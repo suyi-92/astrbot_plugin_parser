@@ -379,10 +379,16 @@ class MessageSender:
     ):
         if self.closed:
             raise DownloadException("消息发送器已停止")
-        task = asyncio.current_task()
+        task = asyncio.create_task(
+            self._send_parse_result(event, result), name="parser-send"
+        )
         self.tasks.add(task)
         try:
-            return await self._send_parse_result(event, result)
+            return await task
+        except asyncio.CancelledError:
+            if self.closed:
+                return False
+            raise
         finally:
             self.tasks.discard(task)
 

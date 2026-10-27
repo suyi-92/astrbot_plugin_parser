@@ -337,7 +337,8 @@ async def test_sender_close_cancels_inflight_conversion(cfg, monkeypatch):
     task = asyncio.create_task(sender.send_parse_result(None, None))
     await started.wait()
     await sender.close()
-    assert task.cancelled() and cancelled.is_set() and not sender.tasks
+    assert await task is False
+    assert cancelled.is_set() and not sender.tasks
     with pytest.raises(DownloadException, match="已停止"):
         await sender.send_parse_result(None, None)
 

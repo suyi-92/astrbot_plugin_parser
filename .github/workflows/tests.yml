@@ -7,6 +7,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         bilibili: ["17.4.1", "17.4.2"]
@@ -16,7 +17,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Ensure FFmpeg and ffprobe
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 install -y ffmpeg
+          fi
+          ffmpeg -version
+          ffprobe -version
       - run: python -m pip install -r requirements.txt -r requirements-test.txt "bilibili-api-python==${{ matrix.bilibili }}"
       - run: python -m pytest -q
       - run: python -m compileall -q main.py core tests
