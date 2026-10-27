@@ -12,24 +12,29 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from importlib.metadata import version
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 from aiohttp.resolver import DefaultResolver
+from multidict import CIMultiDict
 
 API_UA = "curl/8.14.1"
 # Two-hour first part; still verify the actual response size, never repeat a
 # small file to pretend it was one continuous large-file transfer.
 DEFAULT_BVID = "BV1Ke411W7YG"
+CONTROL_BVID = "BV1MsnG6TEYy"
 DEFAULT_SECONDS = 120
 DEFAULT_MIB = 256
 JSON_OUTPUT = ContextVar("bili_speedtest_json", default=False)
+OUTPUT_CONTEXT = ContextVar("bili_speedtest_context", default=None)
 MEDIA_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -65,13 +70,23 @@ class ProbeError(Exception):
 
 
 def emit(event, **fields):
+    fields = {**(OUTPUT_CONTEXT.get() or {}), **fields}
     if JSON_OUTPUT.get():
         print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
+    elif event == "selected_video" and fields.get("diagnose"):
+        print(
+            f"样本 {fields['bvid']} · q{fields['quality']} · "
+            f"{fields['width']}×{fields['height']}",
+            flush=True,
+        )
     elif event == "cdn_result":
         result = fields["result"]
+        label = fields["cdn"]
+        if fields.get("diagnose"):
+            label += f" [{fields['client']}]"
         if fields["received_bytes"]:
             # Include connection/header time in the user-facing comparison.
-            line = f"{fields['cdn']}: {fields['effective_mib_s']:.2f} MiB/s"
+            line = f"{label}: {fields['effective_mib_s']:.2f} MiB/s"
             if result not in ("complete", "sample-byte-limit", "sample-time-limit"):
                 line += f"（中断：{result}）"
             elif fields.get("small_source"):
@@ -80,7 +95,9 @@ def emit(event, **fields):
             reason = (
                 "未收到数据" if result in ("complete", "sample-time-limit") else result
             )
-            line = f"{fields['cdn']}: 不可用（{reason}）"
+            line = f"{label}: 不可用（{reason}）"
+        if fields.get("diagnose"):
+            line += f" · {fields['received_mib']:.1f} MiB / {fields['elapsed_s']:.1f}s"
         print(line, flush=True)
     elif event == "failed":
         print(f"测速失败：{fields['error']}", flush=True)
@@ -260,6 +277,159 @@ async def response_for(session, url, proxy):
     raise ProbeError("redirect-limit")
 
 
+def curl_config_value(value):
+    # URLs/proxy credentials travel over stdin, never argv, logs or a temp file.
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ProbeError("unsafe-curl-config")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+async def curl_resolve(url):
+    parsed = urlsplit(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    resolver = PublicResolver()
+    try:
+        async with asyncio.timeout(15):
+            addresses = await resolver.resolve(parsed.hostname, port)
+    finally:
+        await resolver.close()
+    ips = list(dict.fromkeys(a["host"] for a in addresses))
+    # Pin the validated public results so curl cannot resolve to an internal IP
+    # between validation and connection. An explicit proxy controls its own DNS.
+    return f"{parsed.hostname}:{port}:" + ",".join(
+        f"[{ip}]" if ":" in ip else ip for ip in ips
+    )
+
+
+async def stop_curl(process):
+    if process.returncode is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        # Drain the pipe as well as waiting, including when its buffer is full.
+        await asyncio.wait_for(process.communicate(), 2)
+    except TimeoutError:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.communicate()
+
+
+class CurlBody:
+    def __init__(self, process):
+        self.process = process
+
+    async def read(self, size):
+        async with asyncio.timeout(60):
+            chunk = await self.process.stdout.read(size)
+        if not chunk:
+            code = await self.process.wait()
+            if code:
+                raise ProbeError(f"curl-exit-{code}")
+        return chunk
+
+
+async def curl_headers(process):
+    for _ in range(5):
+        try:
+            async with asyncio.timeout(60):
+                raw = await process.stdout.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError:
+            code = await process.wait()
+            raise ProbeError(
+                f"curl-exit-{code}" if code else "invalid-curl-headers"
+            ) from None
+        except asyncio.LimitOverrunError:
+            raise ProbeError("oversized-curl-headers") from None
+        lines = raw.decode("iso-8859-1").split("\r\n")
+        match = re.fullmatch(r"HTTP/1\.[01] (\d{3})(?: .*)?", lines[0])
+        if not match:
+            raise ProbeError("invalid-curl-headers")
+        status = int(match[1])
+        if 100 <= status < 200 and status != 101:
+            continue
+        headers = CIMultiDict()
+        for line in lines[1:]:
+            if line:
+                key, sep, value = line.partition(":")
+                if not sep or not key:
+                    raise ProbeError("invalid-curl-headers")
+                headers.add(key.strip(), value.strip())
+        return status, headers
+    raise ProbeError("too-many-interim-responses")
+
+
+@asynccontextmanager
+async def curl_response_for(session, url, proxy, seconds):
+    """One curl process per hop; same headers, no retries/parallelism/Range."""
+    for _ in range(4):
+        validate_media_url(url)
+        resolve = await curl_resolve(url)
+        options = [
+            ("url", url),
+            ("proxy", proxy or ""),
+            ("noproxy", "" if proxy else "*"),
+            ("resolve", resolve),
+            *(("header", f"{key}: {value}") for key, value in MEDIA_HEADERS.items()),
+        ]
+        config = "\n".join(
+            f"{key} = {curl_config_value(value)}" for key, value in options
+        )
+        process = await asyncio.create_subprocess_exec(
+            "curl",
+            "--disable",
+            "--silent",
+            "--http1.1",
+            "--globoff",
+            "--path-as-is",
+            "--include",
+            "--suppress-connect-headers",
+            "--no-buffer",
+            "--proto",
+            "=http,https",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            str(seconds),
+            "--retry",
+            "0",
+            "--config",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            process.stdin.write(config.encode())
+            await process.stdin.drain()
+            process.stdin.close()
+            status, headers = await curl_headers(process)
+            if status in (301, 302, 303, 307, 308):
+                location = headers.get("Location")
+                if not location:
+                    raise ProbeError("invalid-redirect")
+                url = urljoin(url, location)
+                continue
+            lengths = headers.getall("Content-Length", [])
+            if lengths and (len(set(lengths)) != 1 or not lengths[0].isdigit()):
+                raise ProbeError("invalid-content-length")
+            yield SimpleNamespace(
+                status=status,
+                headers=headers,
+                content_length=int(lengths[0]) if lengths else None,
+                url=SimpleNamespace(host=urlsplit(url).hostname),
+                content=CurlBody(process),
+            )
+            return
+        finally:
+            await stop_curl(process)
+    raise ProbeError("redirect-limit")
+
+
 async def sample(
     session,
     url,
@@ -267,6 +437,7 @@ async def sample(
     proxy=None,
     seconds=DEFAULT_SECONDS,
     max_bytes=DEFAULT_MIB * 1024**2,
+    client="aiohttp",
 ):
     start = time.monotonic()
     body_start = None
@@ -280,7 +451,12 @@ async def sample(
     emit("cdn_start", cdn=host, seconds=seconds, max_mib=max_bytes / 1024**2)
     try:
         async with asyncio.timeout(seconds):
-            async with response_for(session, url, proxy) as response:
+            context = (
+                response_for(session, url, proxy)
+                if client == "aiohttp"
+                else curl_response_for(session, url, proxy, seconds)
+            )
+            async with context as response:
                 status = response.status
                 body_start = time.monotonic()
                 served_host = response.url.host
@@ -346,6 +522,7 @@ async def sample(
     elapsed = time.monotonic() - start
     body_seconds = max(time.monotonic() - body_start, 1e-6) if body_start else elapsed
     report = {
+        "client": client,
         "cdn": host,
         "served_cdn": served_host,
         "http": status,
@@ -376,11 +553,34 @@ async def run(args, proxy):
         bilibili_api=version("bilibili-api-python"),
         aiohttp=version("aiohttp"),
     )
-    started = time.monotonic()
+    diagnose = getattr(args, "diagnose", False)
+    if diagnose and not shutil.which("curl"):
+        raise ProbeError("curl-not-installed")
+    targets = (
+        list(dict.fromkeys([CONTROL_BVID, args.bvid])) if diagnose else [args.bvid]
+    )
+    usable = False
     try:
-        data = await fetch_video(args.bvid, args.page, proxy, args.credential_file)
+        for bvid in targets:
+            token = OUTPUT_CONTEXT.set({"bvid": bvid, "diagnose": diagnose})
+            try:
+                result = await run_video(args, proxy, bvid, diagnose)
+            finally:
+                OUTPUT_CONTEXT.reset(token)
+            if result == 2:
+                return 2
+            usable |= result == 0
     finally:
         await close_api()
+    emit("finished", note="仅测B站视频CDN；限时/限量采样不证明整片稳定，也不包含QQ上传")
+    return 0 if usable else 1
+
+
+async def run_video(args, proxy, bvid, diagnose):
+    started = time.monotonic()
+    # The short reference always uses its first part, even for a custom --page.
+    page = 1 if diagnose and bvid == CONTROL_BVID else args.page
+    data = await fetch_video(bvid, page, proxy, args.credential_file)
     info, urls = select_video(data, args.quality, args.block_pcdn)
     emit(
         "selected_video",
@@ -391,30 +591,33 @@ async def run(args, proxy):
     )
     usable = False
     async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(resolver=PublicResolver()),
+        connector=aiohttp.TCPConnector(resolver=PublicResolver(), force_close=diagnose),
         timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
         cookie_jar=aiohttp.DummyCookieJar(),
         auto_decompress=False,
         trust_env=False,
     ) as session:
         for url in urls[: args.max_cdns]:
-            report = await sample(
-                session,
-                url,
-                proxy=proxy,
-                seconds=args.seconds,
-                max_bytes=args.mib * 1024**2,
-            )
-            if report["http"] in (412, 429):
-                emit("stopped", reason="platform-rate-or-risk-limit")
-                return 2
-            usable |= report["received_bytes"] > 0 and report["result"] in (
-                "complete",
-                "partial-response",
-                "sample-byte-limit",
-                "sample-time-limit",
-            )
-    emit("finished", note="仅测B站视频CDN；限时/限量采样不证明整片稳定，也不包含QQ上传")
+            # Reuse the exact official URL, not a second API result. Sequential
+            # clients do not compete for bandwidth or retry a risk response.
+            for client in ("aiohttp", "curl") if diagnose else ("aiohttp",):
+                report = await sample(
+                    session,
+                    url,
+                    proxy=proxy,
+                    seconds=args.seconds,
+                    max_bytes=args.mib * 1024**2,
+                    client=client,
+                )
+                if report["http"] in (412, 429):
+                    emit("stopped", reason="platform-rate-or-risk-limit")
+                    return 2
+                usable |= report["received_bytes"] > 0 and report["result"] in (
+                    "complete",
+                    "partial-response",
+                    "sample-byte-limit",
+                    "sample-time-limit",
+                )
     return 0 if usable else 1
 
 
@@ -445,6 +648,11 @@ def main(argv=None):
         "--json",
         action="store_true",
         help="输出详细 JSON 诊断；默认只显示各 CDN 的速度/失败原因",
+    )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="对比原短视频与当前样本；各官方地址用 aiohttp/curl 各测一次，保持简短输出",
     )
     parser.add_argument("--max-cdns", type=int, choices=range(1, 5), default=4)
     parser.add_argument("--block-pcdn", action="store_true")
