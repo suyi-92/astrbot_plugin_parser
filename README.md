@@ -70,11 +70,13 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
 完整的部署、回滚和验收说明见 [Fork 运维说明](docs/FORK_MAINTENANCE.md)。
 
 1. 先备份插件代码及插件配置，停用插件；保持 `/AstrBot/data/plugin_data/astrbot_plugin_parser/` 原样。
-2. **PR 合并到本 Fork 的 main 之后**，在 AstrBot WebUI 的插件管理中使用仓库地址安装：
-   `https://github.com/suyi-92/astrbot_plugin_parser`。不要从市场安装上游同名插件覆盖 Fork。
-3. 已安装原版时，使用运维说明中的替换步骤，保持安装目录
-   `/AstrBot/data/plugins/astrbot_plugin_parser/`；PR 未合并时也可按说明试用新分支。
-4. 在 AstrBot 的 Python 环境中安装本仓库 `requirements.txt`，确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
+2. 修改已合并到本 Fork 的 **main**。在 AstrBot WebUI 点击「＋ → 从链接安装」，填写
+   `https://github.com/suyi-92/astrbot_plugin_parser`，点击安装。不要从市场安装上游同名插件覆盖 Fork。
+3. **AstrBot 4.29.3 无需先卸载原版**：链接安装会根据相同的 `name: astrbot_plugin_parser`
+   替换旧代码，保留插件配置与 `plugin_data`，并记录新的仓库安装来源。不要勾选删除配置或数据。
+   如部署版本提示目录已存在，先停止操作并查看报错，可使用运维说明中的手动代码替换步骤。
+4. WebUI 安装会处理 `requirements.txt`；手动安装时使用 AstrBot 的 Python 环境安装依赖。
+   确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
 5. 查看版本是否为 v1.6.2、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
 
 回滚时停用插件，恢复备份的**插件代码**，或检出上游 v1.6.1 发布提交

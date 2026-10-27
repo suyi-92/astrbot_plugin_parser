@@ -4,7 +4,7 @@
 基线：`suyi-92/astrbot_plugin_parser@5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`，与读取时的上游 main 相同。
 原版 v1.6.1 发布提交是 `99eb31c76738fe9e865f56697d53146df153b1f2`；二者只有 README 差异。
 
-## 安装与试用分支
+## 从 main 安装与升级
 
 - 插件代码：`/AstrBot/data/plugins/astrbot_plugin_parser/`
 - 持久化目录：`/AstrBot/data/plugin_data/astrbot_plugin_parser/`
@@ -15,16 +15,19 @@
 不要清空整个插件配置或复制任何真实 Cookie 到 Git。
 本次开发、测试只操作隔离测试目录及合成凭证，不连接或修改用户生产容器。
 
-### WebUI 安装（PR 合并后）
+### WebUI 安装（推荐，无需先卸载）
 
 1. 在 WebUI 停用现有万能解析器，备份其代码与插件配置文件。备份文件由管理员妥善保存，勿公开上传。
-2. 首次安装时使用仓库 URL `https://github.com/suyi-92/astrbot_plugin_parser`。
-   已安装原版的实例，优先按下节替换代码；不要选择会清理插件数据的卸载操作。
+2. 修改已合并到 `main`。点击「＋ → 从链接安装」，填写
+   `https://github.com/suyi-92/astrbot_plugin_parser` 并安装；首次安装和已安装原版均使用此入口。
+   AstrBot 4.29.3 的安装器按相同 metadata `name` 识别已有插件，备份并替换代码，保留配置和
+   `plugin_data`；安装服务会记录 Fork 为仓库安装来源。无需先卸载，不要选择删除配置或数据。
+   若实际部署提示「目录已存在」，先保留现状并检查版本/日志，或按下节仅替换代码。
 3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.2`、`repo` 指向本 Fork。
-4. 使用 AstrBot 实际运行的 Python 安装本仓库 `requirements.txt`，再启用插件。
+4. WebUI 会安装 `requirements.txt` 中的依赖；另需系统提供 FFmpeg/ffprobe。安装成功后再启用插件。
 5. WebUI → 插件配置 → 解析器 → B站解析器，可见 README 列出的 8 项新配置；全局另有 `debug_media_info`。
 
-### PR 未合并时试用／手动替换
+### 手动替换代码（备用方式）
 
 先在 WebUI 停用插件。以下示例在容器内执行；容器名如不是 `astrbot`，请替换。
 代码备份与 staging 必须位于插件扫描目录之外。保留宿主机的 Docker `data` 卷映射。
@@ -37,7 +40,7 @@ docker exec -it astrbot sh
 
 ```sh
 mkdir -p /AstrBot/data/plugin-staging /AstrBot/data/plugin-backups
-git clone --branch fix/bilibili-resume-and-login --single-branch \
+git clone --branch main --single-branch \
   https://github.com/suyi-92/astrbot_plugin_parser.git \
   /AstrBot/data/plugin-staging/astrbot_plugin_parser
 
@@ -60,7 +63,8 @@ ffprobe -version
 
 ### 后续升级
 
-PR 合并后，推荐 WebUI 使用 Fork 地址更新。在 Git 安装方式中，可停用插件后执行：
+推荐 WebUI 使用 Fork 仓库来源更新，也可再次从上述链接安装；不要切换回市场中的上游来源。
+在 Git 安装方式中，可停用插件后执行：
 
 ```sh
 cd /AstrBot/data/plugins/astrbot_plugin_parser
