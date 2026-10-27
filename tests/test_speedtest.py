@@ -162,7 +162,10 @@ async def test_payload_disconnect_reports_partial_measurement(capsys):
             result = await speed.sample(session, base + "/video?token=SECRET")
     assert result["result"] == "ClientPayloadError"
     assert result["received_mib"] > 0
-    assert "SECRET" not in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "SECRET" not in output
+    assert "中断：ClientPayloadError" in output
+    assert len(output.splitlines()) == 1
 
 
 @pytest.mark.usefixtures("local_media")
@@ -315,8 +318,10 @@ async def test_explicit_credential_is_read_only(monkeypatch, tmp_path):
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("exit_code", [0, 1, 130])
-def test_launcher_cleans_environment_and_installer_scratch(tmp_path, exit_code):
+@pytest.mark.parametrize(
+    "phase,exit_code", [("probe", 0), ("probe", 1), ("probe", 130), ("install", 1)]
+)
+def test_launcher_cleans_environment_and_installer_scratch(tmp_path, phase, exit_code):
     """Reproduce installers leaving files in TMPDIR, also on failure/cancel exit."""
     bin_dir = tmp_path / "bin"
     scratch = tmp_path / "scratch"
@@ -336,10 +341,13 @@ def test_launcher_cleans_environment_and_installer_scratch(tmp_path, exit_code):
         "args=sys.argv[1:]\n"
         "if args[0]=='-c': sys.exit(0)\n"
         "if args[:2]==['-m','venv']:\n"
+        "    print('VENV_NOISE', file=sys.stderr)\n"
         "    dest=Path(args[2])/'bin'/'python'; dest.parent.mkdir(parents=True)\n"
         "    shutil.copyfile(sys.argv[0], dest); dest.chmod(0o755); sys.exit(0)\n"
         "if args[:2]==['-m','pip']:\n"
-        "    (Path(os.environ['TMPDIR'])/'installer-leftovers').mkdir(); sys.exit(0)\n"
+        "    print('DEPRECATION_INSTALL_NOISE', file=sys.stderr)\n"
+        "    (Path(os.environ['TMPDIR'])/'installer-leftovers').mkdir()\n"
+        f"    sys.exit({exit_code if phase == 'install' else 0})\n"
         "assert args[-2:]==['--seconds', '15']\n"
         f"sys.exit({exit_code})\n"
     )
@@ -351,7 +359,8 @@ def test_launcher_cleans_environment_and_installer_scratch(tmp_path, exit_code):
         "BILI_SPEEDTEST_REF": "main",
     }
     result = subprocess.run(
-        ["bash", str(TOOL.with_suffix(".sh")), "--seconds", "15"],
+        ["bash", "-s", "--", "--seconds", "15"],
+        input=TOOL.with_suffix(".sh").read_text(),
         env=env,
         capture_output=True,
         text=True,
@@ -360,3 +369,109 @@ def test_launcher_cleans_environment_and_installer_scratch(tmp_path, exit_code):
     assert result.returncode == exit_code, result.stdout + result.stderr
     assert not list(scratch.iterdir())
     assert sentinel.read_text() == "preserve"
+    assert result.stdout == ""
+    if phase == "install":
+        assert "测速依赖安装失败" in result.stderr
+        assert "INSTALL_NOISE" not in result.stderr
+    else:
+        assert result.stderr == ""
+
+
+def test_quiet_result_only_uses_effective_speed(capsys):
+    speed.emit("settings", bvid="BV1Ke411W7YG")
+    speed.emit("cdn_start", cdn="a.bilivideo.com")
+    speed.emit("progress", received_mib=1)
+    speed.emit(
+        "cdn_result",
+        cdn="a.bilivideo.com",
+        result="sample-byte-limit",
+        received_bytes=256 * 1024**2,
+        effective_mib_s=3.251,
+        speed_mib_s=5.22,
+        small_source=False,
+    )
+    speed.emit("cdn_result", cdn="b.bilivideo.com", result="HTTP567", received_bytes=0)
+    speed.emit("finished", note="done")
+    assert capsys.readouterr().out.splitlines() == [
+        "a.bilivideo.com: 3.25 MiB/s",
+        "b.bilivideo.com: 不可用（HTTP567）",
+    ]
+
+
+def test_large_default_and_json_opt_in_restore_output_mode(monkeypatch, capsys):
+    calls = []
+
+    async def run(args, proxy):
+        calls.append(args)
+        speed.emit("settings", bvid=args.bvid)
+        speed.emit(
+            "cdn_result",
+            cdn="a.bilivideo.com",
+            result="sample-time-limit",
+            received_bytes=1024**2,
+            effective_mib_s=0.1,
+            small_source=False,
+        )
+        return 0
+
+    monkeypatch.setattr(speed, "run", run)
+    monkeypatch.delenv("BILI_TEST_PROXY", raising=False)
+    assert speed.main(["--json"]) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [r["event"] for r in records] == ["settings", "cdn_result"]
+    assert calls[0].bvid == "BV1Ke411W7YG"
+    assert calls[0].seconds == 120 and calls[0].mib == 256
+    assert not speed.JSON_OUTPUT.get()
+    assert speed.main([]) == 0
+    assert capsys.readouterr().out == "a.bilivideo.com: 0.10 MiB/s\n"
+
+
+@pytest.mark.usefixtures("local_media")
+async def test_256mib_is_one_continuous_large_response(capsys):
+    calls = []
+    block = b"x" * 1024**2
+
+    async def handler(request):
+        calls.append(request.path)
+        assert "Range" not in request.headers
+        response = web.StreamResponse(headers={"Content-Length": str(256 * len(block))})
+        await response.prepare(request)
+        for _ in range(256):
+            await response.write(block)
+        return response
+
+    async with serve(handler) as base:
+        async with aiohttp.ClientSession() as session:
+            result = await speed.sample(session, base + "/large?signature=PRIVATE")
+    assert calls == ["/large"]
+    assert result["received_bytes"] == 256 * 1024**2
+    assert result["result"] == "sample-byte-limit"
+    assert not result["small_source"]
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) == 1 and "MiB/s" in output
+    assert "PRIVATE" not in output and '"event"' not in output
+
+
+@pytest.mark.usefixtures("local_media")
+@pytest.mark.parametrize("length_known", [True, False])
+async def test_small_source_is_not_repeated_or_presented_as_large(length_known, capsys):
+    calls = []
+    block = b"x" * 1024**2
+
+    async def handler(request):
+        calls.append(request.path)
+        headers = {"Content-Length": str(13 * len(block))} if length_known else {}
+        response = web.StreamResponse(headers=headers)
+        await response.prepare(request)
+        for _ in range(13):
+            await response.write(block)
+        return response
+
+    async with serve(handler) as base:
+        async with aiohttp.ClientSession() as session:
+            result = await speed.sample(session, base)
+    assert len(calls) == 1
+    assert result["small_source"]
+    assert result["received_bytes"] == 13 * 1024**2
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) == 1 and "小文件样本：13.0 MiB" in output

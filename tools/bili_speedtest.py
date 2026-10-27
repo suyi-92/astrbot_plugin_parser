@@ -15,6 +15,7 @@ import re
 import sys
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -23,6 +24,12 @@ import aiohttp
 from aiohttp.resolver import DefaultResolver
 
 API_UA = "curl/8.14.1"
+# Two-hour first part; still verify the actual response size, never repeat a
+# small file to pretend it was one continuous large-file transfer.
+DEFAULT_BVID = "BV1Ke411W7YG"
+DEFAULT_SECONDS = 120
+DEFAULT_MIB = 256
+JSON_OUTPUT = ContextVar("bili_speedtest_json", default=False)
 MEDIA_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -58,7 +65,27 @@ class ProbeError(Exception):
 
 
 def emit(event, **fields):
-    print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
+    if JSON_OUTPUT.get():
+        print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
+    elif event == "cdn_result":
+        result = fields["result"]
+        if fields["received_bytes"]:
+            # Include connection/header time in the user-facing comparison.
+            line = f"{fields['cdn']}: {fields['effective_mib_s']:.2f} MiB/s"
+            if result not in ("complete", "sample-byte-limit", "sample-time-limit"):
+                line += f"（中断：{result}）"
+            elif fields.get("small_source"):
+                line += f"（小文件样本：{fields['total_bytes'] / 1024**2:.1f} MiB）"
+        else:
+            reason = (
+                "未收到数据" if result in ("complete", "sample-time-limit") else result
+            )
+            line = f"{fields['cdn']}: 不可用（{reason}）"
+        print(line, flush=True)
+    elif event == "failed":
+        print(f"测速失败：{fields['error']}", flush=True)
+    elif event == "stopped" and fields.get("reason") == "user-cancelled":
+        print("测速已停止", flush=True)
 
 
 def safe_error(exc):
@@ -233,7 +260,14 @@ async def response_for(session, url, proxy):
     raise ProbeError("redirect-limit")
 
 
-async def sample(session, url, *, proxy=None, seconds=45, max_bytes=32 * 1024**2):
+async def sample(
+    session,
+    url,
+    *,
+    proxy=None,
+    seconds=DEFAULT_SECONDS,
+    max_bytes=DEFAULT_MIB * 1024**2,
+):
     start = time.monotonic()
     body_start = None
     received = 0
@@ -284,6 +318,8 @@ async def sample(session, url, *, proxy=None, seconds=45, max_bytes=32 * 1024**2
                             and received != response.content_length
                         ):
                             raise ProbeError("incomplete-payload")
+                        if total_bytes is None:
+                            total_bytes = received
                         break
                     received += len(chunk)
                     now = time.monotonic()
@@ -319,6 +355,7 @@ async def sample(session, url, *, proxy=None, seconds=45, max_bytes=32 * 1024**2
         "received_mib": round(received / 1024**2, 3),
         "received_bytes": received,
         "total_bytes": total_bytes,
+        "small_source": total_bytes is not None and total_bytes < max_bytes,
         "speed_mib_s": round(received / max(body_seconds, 1e-6) / 1024**2, 3),
         "effective_mib_s": round(received / max(elapsed, 1e-6) / 1024**2, 3),
     }
@@ -385,16 +422,29 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="B站官方 CDN 单连接测速；Ctrl+C 终止，不保存视频。"
     )
-    parser.add_argument("bvid", nargs="?", default="BV1MsnG6TEYy")
+    parser.add_argument("bvid", nargs="?", default=DEFAULT_BVID)
     parser.add_argument("--page", type=int, default=1)
     parser.add_argument(
         "--quality", type=int, choices=(16, 32, 64, 80, 112, 116), default=116
     )
     parser.add_argument(
-        "--seconds", type=int, choices=range(5, 121), metavar="5..120", default=45
+        "--seconds",
+        type=int,
+        choices=range(5, 301),
+        metavar="5..300",
+        default=DEFAULT_SECONDS,
     )
     parser.add_argument(
-        "--mib", type=int, choices=range(1, 65), metavar="1..64", default=32
+        "--mib",
+        type=int,
+        choices=range(1, 1025),
+        metavar="1..1024",
+        default=DEFAULT_MIB,
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="输出详细 JSON 诊断；默认只显示各 CDN 的速度/失败原因",
     )
     parser.add_argument("--max-cdns", type=int, choices=range(1, 5), default=4)
     parser.add_argument("--block-pcdn", action="store_true")
@@ -409,6 +459,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not re.fullmatch(r"BV[0-9A-Za-z]{10}", args.bvid) or args.page < 1:
         parser.error("需要有效 BV 号和大于零的分 P")
+    output_token = JSON_OUTPUT.set(args.json)
     try:
         proxy = (
             getpass.getpass("HTTP 代理地址（输入隐藏）: ")
@@ -436,6 +487,8 @@ def main(argv=None):
     except Exception as exc:
         emit("failed", error=safe_error(exc))
         return 1
+    finally:
+        JSON_OUTPUT.reset(output_token)
 
 
 if __name__ == "__main__":
