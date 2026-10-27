@@ -21,6 +21,7 @@ from aiohttp.resolver import DefaultResolver
 
 from astrbot.api import logger
 
+from .diagnostics import TransferProgress, note, stage
 from .exception import DownloadException, SizeLimitException, ZeroSizeException
 
 MEDIA_DOMAINS = (
@@ -297,10 +298,20 @@ class ResumableDownloader:
         Otherwise the partial is discarded before writing a new representation.
         """
         self.cleanup()
+        debug = self.cfg.debug_media_info
+        waiting = time.monotonic()
+        note(debug, "流缓存锁等待")
         try:
             async with asyncio.timeout(max(1, self.options.task_timeout)):
                 async with cache_lock(path):
-                    if await self.cached(path, resource):
+                    note(
+                        debug,
+                        f"流缓存锁就绪 elapsed_s={time.monotonic() - waiting:.2f}",
+                    )
+                    with stage(debug, "流缓存校验"):
+                        cached = await self.cached(path, resource)
+                    if cached:
+                        note(debug, f"流缓存命中 bytes={path.stat().st_size}")
                         return path
                     return await self._download(
                         list(dict.fromkeys(urls)),
@@ -317,6 +328,8 @@ class ResumableDownloader:
             raise DownloadException("B站缓存写入失败，请检查磁盘空间及权限") from None
 
     async def _download(self, urls, path, resource, headers, proxy, refresh, validate):
+        debug = self.cfg.debug_media_info
+        stream = "audio" if resource.endswith(":audio") else "video"
         part, meta_path = Path(str(path) + ".part"), Path(str(path) + ".part.json")
         max_bytes = self.cfg.source_max_size * 1024 * 1024
         index, refreshed, last_error = 0, False, "no-candidate"
@@ -356,9 +369,20 @@ class ResumableDownloader:
             if offset:
                 send_headers["Range"] = f"bytes={offset}-"
                 send_headers["If-Range"] = etag if strong else meta["modified"]
+            started = time.monotonic()
+            note(
+                debug,
+                f"CDN请求 stream={stream} cdn={host} "
+                f"attempt={attempt + 1}/{self.cfg.download_retry_times + 1} resume_bytes={offset}",
+            )
             try:
                 async with self._response(url, send_headers, proxy) as response:
                     status = response.status
+                    note(
+                        debug,
+                        f"CDN响应 stream={stream} cdn={host} status={status} "
+                        f"headers_s={time.monotonic() - started:.2f}",
+                    )
                     if status in (412, 429):
                         raise DownloadException(
                             f"B站 CDN 请求受限（{status}），请稍后重试"
@@ -434,6 +458,7 @@ class ResumableDownloader:
                         "etag": new_etag,
                         "modified": modified,
                     }
+                    progress = TransferProgress(debug, stream, host, offset, total)
                     # Truncate before replacing metadata, including across a crash/reload.
                     with part.open("ab" if offset else "wb") as output:
                         write_json(meta_path, meta)
@@ -442,6 +467,7 @@ class ResumableDownloader:
                                 raise SizeLimitException
                             output.write(chunk)
                             offset += len(chunk)
+                            progress.update(offset)
                         output.flush()
                         os.fsync(output.fileno())
                     if expected_end is not None and offset != expected_end:
@@ -450,13 +476,21 @@ class ResumableDownloader:
                         raise Retryable("incomplete-payload")
                     if not offset:
                         raise ZeroSizeException
+                    progress.update(offset, force=True)
+                    note(
+                        debug,
+                        f"流接收完成 stream={stream} bytes={offset} "
+                        f"attempt_s={time.monotonic() - started:.2f}",
+                    )
                 if validate:
                     try:
-                        await validate(part)
+                        with stage(debug, f"{stream}完整性校验"):
+                            await validate(part)
                     except DownloadException:
                         self._discard(path)
                         raise
-                await self.publish(part, path, resource)
+                with stage(debug, f"{stream}缓存写入"):
+                    await self.publish(part, path, resource)
                 meta_path.unlink(missing_ok=True)
                 return path
             except (SizeLimitException, ZeroSizeException):
@@ -468,6 +502,11 @@ class ResumableDownloader:
                 )
                 logger.warning(
                     f"B站 CDN {host}: {last_error} ({attempt + 1}/{self.cfg.download_retry_times + 1})"
+                )
+                note(
+                    debug,
+                    f"CDN重试 stream={stream} cdn={host} error={last_error} "
+                    f"attempt_s={time.monotonic() - started:.2f} saved_bytes={offset}",
                 )
                 failures[url_hash] = failures.get(url_hash, 0) + 1
                 rotate = isinstance(exc, Retryable) and exc.rotate

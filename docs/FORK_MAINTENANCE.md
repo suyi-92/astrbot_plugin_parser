@@ -1,4 +1,4 @@
-# v1.6.2 Fork 运维与验收
+# v1.6.3 Fork 运维与验收
 
 本维护版面向 AstrBot 4.29.3 / Python 3.12 / Debian Docker，继承原项目与 MIT 许可证。
 基线：`suyi-92/astrbot_plugin_parser@5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`，与读取时的上游 main 相同。
@@ -23,7 +23,7 @@
    AstrBot 4.29.3 的安装器按相同 metadata `name` 识别已有插件，备份并替换代码，保留配置和
    `plugin_data`；安装服务会记录 Fork 为仓库安装来源。无需先卸载，不要选择删除配置或数据。
    若实际部署提示「目录已存在」，先保留现状并检查版本/日志，或按下节仅替换代码。
-3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.2`、`repo` 指向本 Fork。
+3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.3`、`repo` 指向本 Fork。
 4. WebUI 会安装 `requirements.txt` 中的依赖；另需系统提供 FFmpeg/ffprobe。安装成功后再启用插件。
 5. WebUI → 插件配置 → 解析器 → B站解析器，可见 README 列出的 8 项新配置；全局另有 `debug_media_info`。
 
@@ -131,6 +131,51 @@ B站完整缓存由独立 TTL 管理；普通平台继续原来的 `clean_cron` 
 `/bstatus` 只表示本地存在包含 SESSDATA 的凭证，**不表示服务器端一定有效**。
 匿名模式无需 Cookie，也不会为匿名解析发起登录验证请求。
 
+## 下载慢与上传慢的区分
+
+v1.6.3 将现有 `debug_media_info` 开关扩展为阶段诊断，无需增加配置字段。
+先更新到 main 的 v1.6.3，在插件配置顶部将日志等级设为 DEBUG，打开底部
+“发送前记录本地视频信息（DEBUG）”，保存。诊断行以 `[解析诊断 请求编号]` 开头；
+同一消息的解析、并行下载和发送任务共享编号，不记录 Cookie、完整媒体地址或异常详情。
+
+1. 保留缓存和登录状态，等待超过防抖间隔（例如配置 60 秒就等超过 60 秒），再次发送同一链接。
+2. 查看 `成片缓存命中`。命中时跳过 CDN 下载和合并，仍会获取 API 信息、校验本地缓存并上传至消息平台。
+3. 再选择一个未解析过的视频测试首次下载；不要清空整个插件数据目录来制造冷缓存。
+4. 在 WebUI 日志中搜索 `解析诊断`，保留该编号从开始至结束的行。
+   也可在自己的 Docker 主机实时筛选（`astrbot` 换成实际容器名）：
+
+```sh
+docker logs --since 2m -f astrbot 2>&1 | grep --line-buffered '解析诊断'
+```
+
+如果慢在“平台上传/发送”，另保留 AstrBot 的 `Starting chunked upload`、
+`Prepared ... upload parts`、`Chunked upload completed` 三类日志，帮助区分上传准备与分片传输。
+不要复制包含预签名地址、访问令牌或 Cookie 的完整调试响应。
+
+| 日志阶段 | 可判断的耗时 |
+| --- | --- |
+| B站视频信息 / B站AI摘要 / B站播放地址 | API 请求和可能的本地凭证刷新；登录后还可能请求 AI 摘要 |
+| 成片缓存锁等待 / 成片缓存校验 | 同资源并发等待、磁盘读取与 SHA-256 校验 |
+| CDN请求 / CDN响应 | 候选域名、请求次数、Range 起始偏移和收到响应头的等待时间 |
+| 下载进度 | `video`/`audio` 的已收 MiB、总 MiB、该日志间隔的 KiB/s；接收数据时约每 10 秒一条，完成另记一条 |
+| CDN重试 | 安全错误码、该次请求耗时及内存中已接收偏移；不表示残片一定能续传 |
+| 完整性校验 / 缓存写入 | ffprobe、哈希与磁盘写入 |
+| FFmpeg合并（copy） | 合并容器的时间，不重新编码视频 |
+| 音频兼容检查/处理（视频copy） | 检查音频，必要时只转换音频 |
+| 平台上传/发送 | 等待 AstrBot 适配器返回的总时间，包含上传、平台处理和发送；不能据此细分到 QQ 内部阶段 |
+
+`elapsed_s` 是该阶段耗时。音视频并行、父子阶段重叠，不能把全部阶段时间简单相加。
+没有新数据时不会伪造进度；看最近的请求/响应记录，随后由读取超时和有限重试处理。
+“平台上传/发送结束”也不代表收件人的 QQ 客户端已下载完；聊天文件卡片上的速度是客户端接收速度。
+先依据日志定位再调整参数，不要把所有超时一律调大。诊断结束后关闭开关并恢复原日志等级。
+
+QQ 官方[富媒体文档](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html)
+当前列出视频软限制 30 MB、硬限制 200 MB，超过软限制转为文件类型上传。
+例如 71.51 MB 的 MP4 显示文件卡片符合该规则。`音频以文件形式上传` 只影响音频；
+视频仍作为 `Video` 组件交给适配器，诊断行会标出 `component=Video`。
+将 `source_max_size` 调小只会拒绝大文件，不会自动压缩；如需要更小视频，可主动选择较低画质或较短视频，
+但 720P 等画质也不保证文件低于 30 MB。最终展示仍由 QQ 决定。
+
 ## QQ 画质排查
 
 在 `debug_media_info=true` 且 AstrBot 日志等级 DEBUG 时，找“上传前本地视频”。
@@ -154,7 +199,7 @@ OneBot v11 的视频组件保持文件 URI。生产环境 NapCat 需能访问相
 测试入口：`python -m pytest -q`；依赖：`requirements.txt`、`requirements-test.txt`，系统 `ffmpeg`/`ffprobe`。
 CI 工作流在 Python 3.12 下覆盖 bilibili-api-python 17.4.1 与 17.4.2，安装 AstrBot 4.29.3。
 本次本地执行结果：Python 3.12.14 / AstrBot 4.29.3 下，bilibili-api-python 17.4.1 与 17.4.2
-分别 **99 passed**；`compileall`、Ruff F/E9 和 `git diff --check` 通过。
+分别 **106 passed**；`compileall`、Ruff F/E9 和 `git diff --check` 通过。
 启用 `-W error::ResourceWarning` 后没有资源泄漏警告；仅 AstrBot 自身 `audioop` 的 Python 3.13 弃用提示。
 测试没有调用真实 B站、没有扫码真实账号、没有向 QQ 或 NapCat 发送消息。
 GitHub Actions 的远端执行状态需在 PR Checks 中查看，本地通过不等于远端 CI 已运行。
@@ -171,6 +216,7 @@ GitHub Actions 的远端执行状态需在 PR Checks 中查看，本地通过不
 | 合并和发送 | 真 FFmpeg copy 哈希对比、音频转换保留分辨率、取消回收、下载失败提示、拒发 `.part` |
 | 登录退出 | Mock 两种扫码 Cookie 响应、0600、重复退出、配置保存、迟到扫码/刷新阻断 |
 | AstrBot/QQ/OneBot | 真实 4.29.3 导入/初始化/注销、真实权限过滤器、Mock QQ 上传字节对比、OneBot URI |
+| 阶段诊断 | 并发请求编号隔离与子任务继承、取消传递、关闭时无输出、速度计算、567/206/缓存日志脱敏、71 MiB 文件仍为 Video 组件、等待适配器返回计时 |
 | 其他平台 | 原有 Cookie/QZone/JSON 测试，抖音/快手经过真实通用下载器的本地模拟回归 |
 
 上线后仍应由管理员依次验证：匿名短视频 → 登录后相同视频实际画质 → 大文件断流 → QQ/NapCat 发送 → `/blogout` → 再次匿名解析。

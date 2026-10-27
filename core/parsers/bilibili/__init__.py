@@ -2,6 +2,7 @@ import asyncio
 from re import Match
 from typing import ClassVar
 import shutil
+import time
 from pathlib import Path
 
 from bilibili_api.video import VideoQuality
@@ -11,6 +12,7 @@ from astrbot.api import logger
 
 from ...config import PluginConfig
 from ...data import ImageContent, MediaContent, Platform, SendGroup
+from ...diagnostics import note, stage
 from ...exception import DownloadException, DurationLimitException, SizeLimitException
 from ...resumable import ResumableDownloader, cache_lock
 from ...utils import merge_av, probe_media
@@ -164,7 +166,8 @@ class BilibiliParser(BaseParser):
 
         video = await self._get_video(bvid=bvid, avid=avid)
         # 转换为 msgspec struct
-        video_info = convert(await video.get_info(), VideoInfo)
+        with stage(self.cfg.debug_media_info, "B站视频信息"):
+            video_info = convert(await video.get_info(), VideoInfo)
         # 获取简介
         text = f"简介: {video_info.desc}" if video_info.desc else None
         # up
@@ -176,10 +179,11 @@ class BilibiliParser(BaseParser):
         ai_summary = ""
         if self.login._credential:
             try:
-                cid = await video.get_cid(page_info.index)
-                ai_conclusion = await video.get_ai_conclusion(cid)
-                ai_conclusion = convert(ai_conclusion, AIConclusion)
-                ai_summary = ai_conclusion.summary
+                with stage(self.cfg.debug_media_info, "B站AI摘要"):
+                    cid = await video.get_cid(page_info.index)
+                    ai_conclusion = await video.get_ai_conclusion(cid)
+                    ai_conclusion = convert(ai_conclusion, AIConclusion)
+                    ai_summary = ai_conclusion.summary
             except Exception:
                 ai_summary = "哔哩哔哩 cookie 未配置或失效, 无法使用 AI 总结"
 
@@ -378,7 +382,8 @@ class BilibiliParser(BaseParser):
         return BilibiliVideo(self.api, self.login, bvid=bvid, avid=avid)
 
     async def _select_streams(self, video, page_index, duration=0):
-        data = await video.get_download_url(page_index=page_index)
+        with stage(self.cfg.debug_media_info, "B站播放地址"):
+            data = await video.get_download_url(page_index=page_index)
         selected = select_streams(
             data,
             self.video_quality.value,
@@ -417,6 +422,7 @@ class BilibiliParser(BaseParser):
             ) from None
 
     async def _download_selected(self, video, bvid, page, duration, audio_only):
+        debug = self.cfg.debug_media_info
         if duration > self.cfg.max_duration:
             raise DurationLimitException
         selected = await self._select_streams(video, page - 1, duration)
@@ -431,9 +437,16 @@ class BilibiliParser(BaseParser):
             self.resumable.directory / f"{bvid}-{page}-q{quality}-{identity}{suffix}"
         )
         resource = f"{bvid}:{page}:{identity}"
+        waiting = time.monotonic()
+        note(debug, "成片缓存锁等待")
         async with cache_lock(output):
-            if await self.resumable.cached(output, resource):
+            note(debug, f"成片缓存锁就绪 elapsed_s={time.monotonic() - waiting:.2f}")
+            with stage(debug, "成片缓存校验"):
+                cached = await self.resumable.cached(output, resource)
+            if cached:
+                note(debug, f"成片缓存命中 bytes={output.stat().st_size}，跳过下载合并")
                 return output
+            note(debug, "成片缓存未命中，开始下载")
             estimated = (
                 selected.audio.info["estimated_bytes"]
                 if audio_only
@@ -505,7 +518,8 @@ class BilibiliParser(BaseParser):
                         asyncio.create_task(download(selected.audio, "audio")),
                     ]
                     try:
-                        paths = list(await asyncio.gather(*tasks))
+                        with stage(debug, "音视频下载及校验"):
+                            paths = list(await asyncio.gather(*tasks))
                     finally:
                         for task in tasks:
                             if not task.done():
@@ -513,12 +527,18 @@ class BilibiliParser(BaseParser):
                         await asyncio.gather(*tasks, return_exceptions=True)
                     if sum(p.stat().st_size for p in paths) > self.cfg.max_size:
                         raise SizeLimitException
-                    await merge_av(v_path=paths[0], a_path=paths[1], output_path=merged)
-                    await validate(merged)
-                    await self.resumable.publish(merged, output, resource)
+                    with stage(debug, "FFmpeg合并（copy）"):
+                        await merge_av(
+                            v_path=paths[0], a_path=paths[1], output_path=merged
+                        )
+                    with stage(debug, "成片完整性校验"):
+                        await validate(merged)
+                    with stage(debug, "成片缓存写入"):
+                        await self.resumable.publish(merged, output, resource)
                 else:
                     paths = [await download(selected.video, "video")]
                     await self.resumable.publish(paths[0], output, resource)
+                note(debug, f"B站媒体就绪 bytes={output.stat().st_size}")
                 return output
             finally:
                 merged.unlink(missing_ok=True)

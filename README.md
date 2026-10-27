@@ -5,7 +5,7 @@
 
 # astrbot_plugin_parser
 
-_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
+_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.3 ✨_
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
@@ -64,7 +64,7 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
 本仓库维护自 [Zhalslar/astrbot_plugin_parser](https://github.com/Zhalslar/astrbot_plugin_parser)，
 基线为 `5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`（v1.6.1，与上游相同，发布提交之后只有 README 修改）。
 保留插件内部名称 `astrbot_plugin_parser`、原作者署名与 [MIT 许可证](LICENSE)。
-本次版本为 **v1.6.2 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
+本次版本为 **v1.6.3 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
 
 目标环境：AstrBot **4.29.3**、Python **3.12**、Debian/Docker；需要 `ffmpeg` 和 `ffprobe`。
 完整的部署、回滚和验收说明见 [Fork 运维说明](docs/FORK_MAINTENANCE.md)。
@@ -77,7 +77,7 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
    如部署版本提示目录已存在，先停止操作并查看报错，可使用运维说明中的手动代码替换步骤。
 4. WebUI 安装会处理 `requirements.txt`；手动安装时使用 AstrBot 的 Python 环境安装依赖。
    确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
-5. 查看版本是否为 v1.6.2、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
+5. 查看版本是否为 v1.6.3、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
 
 回滚时停用插件，恢复备份的**插件代码**，或检出上游 v1.6.1 发布提交
 `99eb31c76738fe9e865f56697d53146df153b1f2`。重新安装该版本依赖并启用。
@@ -99,7 +99,9 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
 | `partial_expire_hours` | `24` | 不活跃残片/未合并流保留小时数 |
 | `cache_expire_hours` | `24` | B站完整缓存按最后使用时间保留小时数 |
 
-全局新增 `debug_media_info=false`：开启后以 DEBUG 记录交给适配器前的本地视频宽高、帧率、编码和字节数，日志等级也需设为 DEBUG。
+全局 `debug_media_info=false`：开启后以 DEBUG 记录交给适配器前的本地视频信息，并输出带同一请求编号的
+`解析诊断` 日志，涵盖信息获取、AI 摘要、缓存命中、CDN 进度/续传、校验、合并及平台上传/发送耗时。
+日志等级也需设为 DEBUG；不开启时不输出新增诊断日志。复测步骤见[耗时排查](docs/FORK_MAINTENANCE.md#下载慢与上传慢的区分)。
 
 - **412 兼容性**：默认组合来源于部分 VPS 的成功排查，不保证所有网络永久有效。
   bilibili-api 的客户端、请求头、buvid 设置是进程全局状态；本 Fork 用一个惰性启动的专用 Python 子进程执行 API 调用，
@@ -137,6 +139,11 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
 对 AstrBot 4.29.3 的 QQ 官方适配器源码检查及本地 Mock 上传测试显示：该发送路径读取本地文件并以 base64 或分片上传，没有视频缩放步骤；OneBot v11 保持原视频文件引用。
 如果发送前本地文件为 1080×1920/30 FPS，而 QQ 保存的视频为 480P，仍需在真实 QQ 会话对比服务端结果。
 **插件无法控制 QQ 服务端二次压缩，也没有验证 QQ 最终下载一定保持原画质。**
+
+QQ 官方[富媒体文档](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html)
+当前标明视频软限制 30 MB、硬限制 200 MB，超过软限制会按文件类型上传。
+因此大 MP4 显示为文件卡片不代表插件改用了 File 组件；诊断日志会记录实际提交的组件类型。
+插件的 `source_max_size` 是拒绝下载的上限，不会把视频压缩到该大小；不自动转码以绕过平台规则。
 
 ## 🎉 指令
 

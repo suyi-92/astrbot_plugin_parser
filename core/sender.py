@@ -27,6 +27,7 @@ from .data import (
     TextContent,
     VideoContent,
 )
+from .diagnostics import note, stage
 from .exception import (
     DownloadException,
     DownloadLimitException,
@@ -161,8 +162,13 @@ class MessageSender:
         if not plan["preview_card"]:
             return
 
-        if image_path := await self.renderer.render_card(result):
-            await event.send(event.chain_result([self._image_from_path(image_path)]))
+        with stage(self.cfg.debug_media_info, "预览卡片渲染"):
+            image_path = await self.renderer.render_card(result)
+        if image_path:
+            with stage(self.cfg.debug_media_info, "预览卡片上传/发送"):
+                await event.send(
+                    event.chain_result([self._image_from_path(image_path)])
+                )
 
     async def _build_segments(
         self,
@@ -180,7 +186,9 @@ class MessageSender:
 
         # 合并转发时，卡片以内联形式作为一个消息段参与合并
         if plan["render_card"] and plan["force_merge"]:
-            if image_path := await self.renderer.render_card(result):
+            with stage(self.cfg.debug_media_info, "内联卡片渲染"):
+                image_path = await self.renderer.render_card(result)
+            if image_path:
                 segs.append(self._image_from_path(image_path))
 
         # 轻媒体处理
@@ -254,12 +262,16 @@ class MessageSender:
                 continue
             match cont:
                 case VideoContent() | DynamicContent():
-                    path = await transcode_video_audio_to_lc(path)
+                    with stage(
+                        self.cfg.debug_media_info, "音频兼容检查/处理（视频copy）"
+                    ):
+                        path = await transcode_video_audio_to_lc(path)
                     if path.stat().st_size > self.cfg.max_size:
                         segs.append(Plain("此项媒体超过大小限制"))
                         continue
                     if self.cfg.debug_media_info:
-                        data = await probe_media(path)
+                        with stage(True, "上传前媒体信息检查"):
+                            data = await probe_media(path)
                         stream = next(
                             (
                                 s
@@ -268,8 +280,10 @@ class MessageSender:
                             ),
                             {},
                         )
-                        logger.debug(
-                            f"上传前本地视频: bytes={path.stat().st_size}, stream={stream}"
+                        note(
+                            True,
+                            f"上传前本地视频: bytes={path.stat().st_size}, "
+                            f"component=Video stream={stream}",
                         )
                     segs.append(self._video_from_path(path))
                 case AudioContent():
@@ -340,14 +354,21 @@ class MessageSender:
 
         await self._send_preview_card(event, result, plan)
 
-        segs = await self._build_segments(result, plan)
+        with stage(self.cfg.debug_media_info, "等待媒体并准备消息"):
+            segs = await self._build_segments(result, plan)
         segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
 
         if not segs:
             return False
 
         try:
-            await event.send(event.chain_result(segs))
+            note(
+                self.cfg.debug_media_info,
+                f"提交适配器 adapter={type(event).__name__} "
+                f"segments={self._collect_seg_meta(segs)}",
+            )
+            with stage(self.cfg.debug_media_info, "平台上传/发送"):
+                await event.send(event.chain_result(segs))
             return True
         except Exception as e:
             seg_meta = self._collect_seg_meta(segs)

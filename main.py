@@ -18,6 +18,7 @@ from .core.arbiter import ArbiterContext, EmojiLikeArbiter
 from .core.clean import CacheCleaner
 from .core.config import PluginConfig
 from .core.debounce import Debouncer
+from .core.diagnostics import note, stage, trace_scope
 from .core.download import Downloader
 from .core.exception import ParseException
 from .core.parsers import BaseParser, BilibiliParser
@@ -232,16 +233,23 @@ class ParserPlugin(Star):
             logger.warning(f"[链接防抖] 链接 {link} 在防抖时间内，跳过解析")
             return
 
-        # 解析
+        with trace_scope(self.cfg.debug_media_info):
+            with stage(self.cfg.debug_media_info, "解析到发送总流程"):
+                await self._handle_match(event, keyword, searched)
+
+    async def _handle_match(self, event, keyword, searched):
+        # Keep parsing and its child media/send tasks under one diagnostic trace.
         try:
-            parse_res = await self.parser_map[keyword].parse(keyword, searched)
+            with stage(self.cfg.debug_media_info, "解析信息"):
+                parse_res = await self.parser_map[keyword].parse(keyword, searched)
         except ParseException as exc:
             await event.send(event.plain_result(str(exc)))
             return
 
         # 基于资源ID防抖
         resource_id = parse_res.get_resource_id()
-        if self.debouncer.hit_resource(umo, resource_id):
+        if self.debouncer.hit_resource(event.unified_msg_origin, resource_id):
+            note(self.cfg.debug_media_info, "资源防抖命中，跳过发送")
             logger.warning(f"[资源防抖] 资源 {resource_id} 在防抖时间内，跳过发送")
             return
 
@@ -312,8 +320,11 @@ class ParserPlugin(Star):
 
     async def parse_and_send(self, event: AstrMessageEvent, url: str) -> bool:
         """供其他插件调用的公开方法：解析指定 URL 并直接发送至 event 对应会话"""
-        result = await self.parse_url(url)
-        return await self.sender.send_parse_result(event, result)
+        with trace_scope(self.cfg.debug_media_info):
+            with stage(self.cfg.debug_media_info, "解析到发送总流程"):
+                with stage(self.cfg.debug_media_info, "解析信息"):
+                    result = await self.parse_url(url)
+                return await self.sender.send_parse_result(event, result)
 
     @filter.llm_tool(name="parse_media_url")
     async def llm_parse_media_url(self, event: AstrMessageEvent, url: str) -> str:
