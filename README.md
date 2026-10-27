@@ -5,11 +5,11 @@
 
 # astrbot_plugin_parser
 
-_✨ 链接解析器 ✨_  
+_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.2 ✨_
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![AstrBot](https://img.shields.io/badge/AstrBot-4.29.3-orange.svg)](https://github.com/Soulter/AstrBot)
 [![GitHub](https://img.shields.io/badge/作者-Zhalslar-blue)](https://github.com/Zhalslar)
 
 </div>
@@ -59,13 +59,82 @@ _✨ 链接解析器 ✨_
 
 ---
 
-## 💿 安装
+## 💿 Fork 安装、升级与回滚
 
-直接在astrbot的插件市场搜索astrbot_plugin_parser，点击安装，等待完成即可
+本仓库维护自 [Zhalslar/astrbot_plugin_parser](https://github.com/Zhalslar/astrbot_plugin_parser)，
+基线为 `5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`（v1.6.1，与上游相同，发布提交之后只有 README 修改）。
+保留插件内部名称 `astrbot_plugin_parser`、原作者署名与 [MIT 许可证](LICENSE)。
+本次版本为 **v1.6.2 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
 
-## ⚙️ 配置
+目标环境：AstrBot **4.29.3**、Python **3.12**、Debian/Docker；需要 `ffmpeg` 和 `ffprobe`。
+完整的部署、回滚和验收说明见 [Fork 运维说明](docs/FORK_MAINTENANCE.md)。
 
-请在astrbot的插件配置面板查看并修改
+1. 先备份插件代码及插件配置，停用插件；保持 `/AstrBot/data/plugin_data/astrbot_plugin_parser/` 原样。
+2. **PR 合并到本 Fork 的 main 之后**，在 AstrBot WebUI 的插件管理中使用仓库地址安装：
+   `https://github.com/suyi-92/astrbot_plugin_parser`。不要从市场安装上游同名插件覆盖 Fork。
+3. 已安装原版时，使用运维说明中的替换步骤，保持安装目录
+   `/AstrBot/data/plugins/astrbot_plugin_parser/`；PR 未合并时也可按说明试用新分支。
+4. 在 AstrBot 的 Python 环境中安装本仓库 `requirements.txt`，确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
+5. 查看版本是否为 v1.6.2、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
+
+回滚时停用插件，恢复备份的**插件代码**，或检出上游 v1.6.1 发布提交
+`99eb31c76738fe9e865f56697d53146df153b1f2`。重新安装该版本依赖并启用。
+不要删除 Cookie、插件持久化数据、聊天记录、AstrBot 数据库或模型配置；回滚不需要 `/blogout`。
+
+## ⚙️ B站配置与工作方式
+
+在 WebUI → 本插件配置 → **解析器 → B站解析器** 中修改下列新增字段。
+旧配置缺失新字段时会自动使用默认值，不要求清空配置，不修改其他平台配置。
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `api_client` | `aiohttp` | API 客户端，可选 `aiohttp` / `httpx` / `curl_cffi` |
+| `api_user_agent` | `curl/8.14.1` | B站 API 与扫码请求 UA；不轮换 UA |
+| `auto_buvid` | `false` | 是否由 bilibili-api 自动获取 buvid |
+| `connect_timeout` | `15` | CDN 建连超时秒数 |
+| `read_timeout` | `60` | CDN 连续无数据的超时秒数 |
+| `task_timeout` | `900` | 整个下载任务上限，含锁等待、播放地址获取/刷新、下载、退避、校验和合并 |
+| `partial_expire_hours` | `24` | 不活跃残片/未合并流保留小时数 |
+| `cache_expire_hours` | `24` | B站完整缓存按最后使用时间保留小时数 |
+
+全局新增 `debug_media_info=false`：开启后以 DEBUG 记录交给适配器前的本地视频宽高、帧率、编码和字节数，日志等级也需设为 DEBUG。
+
+- **412 兼容性**：默认组合来源于部分 VPS 的成功排查，不保证所有网络永久有效。
+  bilibili-api 的客户端、请求头、buvid 设置是进程全局状态；本 Fork 用一个惰性启动的专用 Python 子进程执行 API 调用，
+  先配置再请求，不修改 AstrBot 主进程中其他插件的设置。扫码 HTTP 会话也由本插件单独持有。
+  子进程只通过匿名管道接收凭证，不使用命令行参数、环境变量或临时凭证文件传递；退出登录、取消请求、重载会结束相关子进程。
+  依赖范围限定在 `bilibili-api-python >=17.4.1,<17.5.0`。
+- **CDN 567/403/5xx**：从 API 的 `base_url`/`baseUrl`/`url` 和 `backup_url`/`backupUrl` 提取完整候选地址，视频/音频都可切换。
+  已知问题节点 `upos-sz-mirrorcosov.bilivideo.com` 降低优先级，失败切换不依赖这个域名。
+  不拼接域名、不复用其他节点的签名。`block_pcdn=true` 时排除已识别的 P/MCDN，全部被排除就报错，**不会回退到被屏蔽节点**。
+- **续传**：`.part` 与 `.part.json` 留存断点；检查 206 的起点、终点、总长度和验证器。
+  同地址需要强 ETag 或 Last-Modified 与已知总长度；跨地址需要相同强 ETag、相同总长度和相同流标识。
+  无法确认、验证器变化、无 Content-Length/可用验证器时安全重下；200 忽略 Range 时截断重写；416 丢弃残片后重新请求。
+  无长度响应必须正常 EOF、通过实时大小限制与 ffprobe 包结构检查。
+  完成后写 SHA-256/大小校验记录，再供缓存复用；本地哈希不等于平台提供的源端完整性签名。
+- **次数和时限**：每条流总共最多 `1 + download_retry_times` 次下载尝试（每次最多 4 个重定向链请求），CDN 切换和刷新后的请求都消耗该预算；退避 1、2、4…秒，上限 8 秒。
+  鉴权/过期地址失败且候选耗尽时，整个音视频任务最多刷新一次官方播放数据。刷新后流身份变化会要求重新解析，不降画质拼接。
+  `download_timeout` 仍是单次下载请求总上限；超时保留可验证断点，下一次请求可继续。
+  因此它不再要求大文件在一次请求内传完；同时受新的整个任务上限约束。412/429 等明确受限响应立即停止，不轮换节点重试。
+- **大小、画质和缓存**：`source_max_size` 仍以 MiB 计，限制单流、音视频之和及最终文件；`source_max_minute` 在下载前检查。
+  码率预估超限会报错，不通过偷偷降清晰度规避限制。画质设置是**上限**，实际画质取决于 API 与账号权限。
+  INFO 记录实际画质 ID（32=480P、64=720P、80=1080P、116=1080P60）、宽高、帧率、编码和估算字节数。
+  新缓存位于 `cache/bilibili/`，标识包含实际画质、编码、媒体路径摘要和音频流；先选流再查缓存。
+  旧的 `BVxxx-1.mp4` 不复用，留给原有清理周期自然失效。
+- **合并与磁盘**：两条流都完成才运行 FFmpeg `-c copy`。完整性检查后原子发布最终文件，失败/取消不发送 `.part`。
+  非 AAC-LC 音频兼容处理仍保持 `-c:v copy`，保存原文件和经过验证的转换文件。
+  开始下载前要求至少 `2 × source_max_size + 16 MiB` 空闲空间；输入之和与输出分别限额，成功后清除中间流。
+  启动时、后续下载前及有下载会话时每小时清理过期文件，并将不活跃残片/未合并流控制在约 `4 × source_max_size` 内；活跃任务不删除。
+  B站独立缓存不被通用 `clean_cron` 粗暴删除，完整缓存由 `cache_expire_hours` 管理。
+- **失败提示与日志**：B站下载/合并失败始终发送简短提示（即使关闭 `show_download_fail_tip`）。媒体日志只含域名、错误类型/状态码、非敏感流信息；不记录签名 URL、Cookie 或 Token。
+  CDN URL 只允许已知媒体域、HTTP(S)、80/443 端口，并检查每次重定向及直接连接的 DNS 公网地址；代理须由管理员信任并正确配置。
+
+### 抖音和 QQ 最终画质
+
+本 Fork 没有改动抖音解析算法。`core/sender.py` 不缩放视频，必要的音频转换使用视频流 copy。
+对 AstrBot 4.29.3 的 QQ 官方适配器源码检查及本地 Mock 上传测试显示：该发送路径读取本地文件并以 base64 或分片上传，没有视频缩放步骤；OneBot v11 保持原视频文件引用。
+如果发送前本地文件为 1080×1920/30 FPS，而 QQ 保存的视频为 480P，仍需在真实 QQ 会话对比服务端结果。
+**插件无法控制 QQ 服务端二次压缩，也没有验证 QQ 最终下载一定保持原画质。**
 
 ## 🎉 指令
 
@@ -73,9 +142,28 @@ _✨ 链接解析器 ✨_
 | :------: | :-------------------: |  :---------------: |
 | 开启解析 |      ADMIN            |     开启当前会话的解析功能      |
 | 关闭解析 |      ADMIN            |    关闭当前会话的解析功能      |
-|  blogin  |      ADMIN           |   扫码获取 B 站凭证 |
+| `/blogin` / `/登录B站` | ADMIN | 扫码获取 B站本地凭证 |
+| `/blogout` / `/退出B站` | ADMIN | 清除本插件内存、配置 Cookie、凭证文件及未完成扫码；可重复执行 |
+| `/bstatus` | ADMIN | 只报告本地凭证是否存在，不验证服务器端有效性 |
 
 ---
+
+退出只清除本插件本地登录态，**不会注销 B站服务器端所有设备**。凭证文件为
+`data/plugin_data/astrbot_plugin_parser/cookies/bilibili_credential.json`，原子保存并设置 `0600`；文件不存在不会导致退出失败。
+新请求立即使用退出后的匿名身份；重载只关闭会话，不删除持久化凭证。管理员才可使用登录/退出/状态命令。
+
+## 🧪 自动化测试
+
+```sh
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt -r requirements-test.txt
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q main.py core tests
+```
+
+测试使用本地 HTTP 服务、合成凭证和 Mock，不需要真实 B站账号或 API。
+包含精确复现 73,745,233 bytes 文件在 43,122,045 bytes 断流后的 Range 续传与 SHA-256 对比、CDN 失败切换、错误 Range/416、取消、限额、并发、低画质缓存隔离、扫码退出竞争，以及真实 FFmpeg 视频流 copy 和 AstrBot 4.29.3 生命周期测试。
+完整测试范围、限制和线上验收步骤见 [运维说明](docs/FORK_MAINTENANCE.md)。
 
 ## 🧠 插件工作流程
 

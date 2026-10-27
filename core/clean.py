@@ -41,8 +41,18 @@ class CacheCleaner:
         """删除并重建缓存目录"""
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, shutil.rmtree, self.cfg.cache_dir)
-            self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+            # Bilibili owns its receipts, partial TTL and active downloads.
+            # Do not remove that directory while a Range download/merge is active.
+            def clean_ordinary_cache():
+                for path in self.cfg.cache_dir.iterdir():
+                    if path.name == "bilibili":
+                        continue
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink(missing_ok=True)
+
+            await loop.run_in_executor(None, clean_ordinary_cache)
             logger.info("Cache directory cleaned and recreated.")
         except Exception:
             logger.exception("Error while cleaning cache directory.")

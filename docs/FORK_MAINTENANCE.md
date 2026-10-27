@@ -1,0 +1,183 @@
+# v1.6.2 Fork 运维与验收
+
+本维护版面向 AstrBot 4.29.3 / Python 3.12 / Debian Docker，继承原项目与 MIT 许可证。
+基线：`suyi-92/astrbot_plugin_parser@5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`，与读取时的上游 main 相同。
+原版 v1.6.1 发布提交是 `99eb31c76738fe9e865f56697d53146df153b1f2`；二者只有 README 差异。
+
+## 安装与试用分支
+
+- 插件代码：`/AstrBot/data/plugins/astrbot_plugin_parser/`
+- 持久化目录：`/AstrBot/data/plugin_data/astrbot_plugin_parser/`
+- B站新缓存：`/AstrBot/data/plugin_data/astrbot_plugin_parser/cache/bilibili/`
+- 本地登录文件：`/AstrBot/data/plugin_data/astrbot_plugin_parser/cookies/bilibili_credential.json`
+
+不要同时安装两个同名插件，不要把代码备份放在 `data/plugins/` 目录内。
+不要清空整个插件配置或复制任何真实 Cookie 到 Git。
+本次开发、测试只操作隔离测试目录及合成凭证，不连接或修改用户生产容器。
+
+### WebUI 安装（PR 合并后）
+
+1. 在 WebUI 停用现有万能解析器，备份其代码与插件配置文件。备份文件由管理员妥善保存，勿公开上传。
+2. 首次安装时使用仓库 URL `https://github.com/suyi-92/astrbot_plugin_parser`。
+   已安装原版的实例，优先按下节替换代码；不要选择会清理插件数据的卸载操作。
+3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.2`、`repo` 指向本 Fork。
+4. 使用 AstrBot 实际运行的 Python 安装本仓库 `requirements.txt`，再启用插件。
+5. WebUI → 插件配置 → 解析器 → B站解析器，可见 README 列出的 8 项新配置；全局另有 `debug_media_info`。
+
+### PR 未合并时试用／手动替换
+
+先在 WebUI 停用插件。以下示例在容器内执行；容器名如不是 `astrbot`，请替换。
+代码备份与 staging 必须位于插件扫描目录之外。保留宿主机的 Docker `data` 卷映射。
+
+```sh
+docker exec -it astrbot sh
+```
+
+容器内：
+
+```sh
+mkdir -p /AstrBot/data/plugin-staging /AstrBot/data/plugin-backups
+git clone --branch fix/bilibili-resume-and-login --single-branch \
+  https://github.com/suyi-92/astrbot_plugin_parser.git \
+  /AstrBot/data/plugin-staging/astrbot_plugin_parser
+
+# 如果安装目录已存在，将代码移动到唯一备份目录；首次安装跳过这一行。
+mv /AstrBot/data/plugins/astrbot_plugin_parser \
+  "/AstrBot/data/plugin-backups/parser-before-fork-$(date +%Y%m%d-%H%M%S)"
+mv /AstrBot/data/plugin-staging/astrbot_plugin_parser \
+  /AstrBot/data/plugins/astrbot_plugin_parser
+
+python --version
+python -m pip install -r /AstrBot/data/plugins/astrbot_plugin_parser/requirements.txt
+ffmpeg -version
+ffprobe -version
+```
+
+`python` 必须是 AstrBot 使用的 Python 3.12；若镜像使用虚拟环境，改用该环境的 Python。
+若没有 pip/git/FFmpeg，在自定义 Dockerfile 中提供它们，避免重建容器后丢失；Debian 系镜像可安装 `git ffmpeg` 系统包。
+不要修改系统 site-packages 中的 bilibili-api 源码。
+启用插件后先匿名测试一个公开视频，再按需 `/blogin`。失败时查看域名/错误码和实际流信息，不公开带 Cookie 的配置或完整 URL。
+
+### 后续升级
+
+PR 合并后，推荐 WebUI 使用 Fork 地址更新。在 Git 安装方式中，可停用插件后执行：
+
+```sh
+cd /AstrBot/data/plugins/astrbot_plugin_parser
+git fetch origin main:refs/remotes/origin/main
+git switch main
+git pull --ff-only origin main
+python -m pip install -r requirements.txt
+```
+
+若本地还没有 `main`，使用 `git switch -c main --track origin/main`。
+若有本地修改，先备份、检查差异；不要用 `reset --hard` 覆盖未知修改。
+重新启用插件。原有 Cookie、模型、聊天和数据库路径都不变。
+
+## 回滚到原版 v1.6.1
+
+1. 停用插件，保存当前 Fork 的代码备份（移出 `data/plugins/`）。
+2. 首选恢复升级前的代码备份到原安装目录；或重新克隆上游并检出以下固定提交：
+
+```sh
+git clone https://github.com/Zhalslar/astrbot_plugin_parser.git \
+  /AstrBot/data/plugin-staging/astrbot_plugin_parser-v161
+cd /AstrBot/data/plugin-staging/astrbot_plugin_parser-v161
+git checkout --detach 99eb31c76738fe9e865f56697d53146df153b1f2
+```
+
+3. 将当前代码目录移到一个新的备份位置，再把上述目录改名移动到
+   `/AstrBot/data/plugins/astrbot_plugin_parser/`；不要同时留两个可加载目录。
+4. 安装原版的 `requirements.txt`，在 WebUI 启用插件。原版不具备本 Fork 的 412/567/续传修复。
+5. **保留全部持久化数据与配置**；不要为回滚执行 `/blogout`。新缓存目录与旧命名隔离，原版不会当成 BV 缓存复用。
+   如果需要释放缓存空间，仅在停止插件后清理确认无用的缓存；不要删除 `cookies/` 或 AstrBot 数据库。
+
+## 下载行为与边界
+
+每个 B站解析器拥有一个 API worker 和一个媒体会话。API 调用在 worker 中串行执行，所有 bilibili-api 全局设置仅作用于这个子进程。
+没有对其他插件的 `HEADERS`、`select_client` 或请求设置做临时猴子补丁。退出登录会结束 worker 以清除其持有的旧凭证；新调用重新启动 worker 并读取当前本地登录态。
+子进程增加少量启动延时和内存；容器必须允许创建 Python 子进程。API 超时后直接报错，不做激进重试。
+
+每条流的下载尝试共享 `1 + download_retry_times` 的预算，不是每个 CDN 都再获得一整套重试。
+每次最多 4 个重定向链请求；默认最多 3 次下载尝试，因此候选很多时未必遍历完全部地址；错误提示会说明“备用节点已尝试或次数已用尽”。
+链接刷新由音视频共享，最多一次，且只能使用同一实际流的官方地址。风控和普通传输故障分开处理。
+403/410 等可以尝试官方备用节点，412/429 立即停止。不会伪装登录权限、替换 CDN 主机名或循环轮换 UA/IP。
+
+`.part` 只在有明确版本验证器时续传；媒体长度与本地偏移必须匹配 `Content-Range`。
+不同 CDN 的强 ETag 和长度相同，且来自同一 API 流标识时才接续；否则重下。
+验证器缺失或 CDN 不支持 Range 时无法保证节省已下载流量，安全重下是有意行为。
+无 Content-Length 的流以正常结束、逐块体积限制及 ffprobe 检查作为完成条件，不把连接异常视为完成。
+平台未提供源文件哈希时无法证明端到端逐字节完整性；SHA-256 用于检测已完成本地缓存的变化，ffprobe 扫描包结构。
+
+同一资源在单个 AstrBot 进程内通过路径锁串行写入，完成文件和元数据原子发布，缓存命中复核大小和本地哈希。
+插件停止会取消并等待自身媒体任务、扫码请求及 FFmpeg 子进程。
+**不支持多个 AstrBot 容器同时写同一个插件缓存卷**；各实例应使用独立数据目录。
+
+`source_max_size` 单位沿用 MiB，分离音视频之和也受限；合并输出超过上限不会发送。
+典型合并峰值约为输入 + 输出两份，音频兼容转换还会保留原成片和转换成片。
+磁盘预检不是空间预留；多个并发视频仍可能耗尽空间，这时会明确报错。
+B站完整缓存由独立 TTL 管理；普通平台继续原来的 `clean_cron` 管理。残片和未合并流按年龄及不活跃字节预算清理。
+
+## 登录与退出
+
+`/blogin`、`/登录B站`、`/blogout`、`/退出B站`、`/bstatus` 均有 AstrBot ADMIN 过滤器。
+`/blogout` 同时清除内存 Credential、配置字段、凭证文件和未完成二维码；重复执行安全。
+请求世代检查防止退出之后旧二维码响应、旧 refresh 响应写回凭证。
+凭证使用同目录临时文件、`0600` 权限、fsync 和原子替换；权限/磁盘错误返回安全提示。
+`/bstatus` 只表示本地存在包含 SESSDATA 的凭证，**不表示服务器端一定有效**。
+匿名模式无需 Cookie，也不会为匿名解析发起登录验证请求。
+
+## QQ 画质排查
+
+在 `debug_media_info=true` 且 AstrBot 日志等级 DEBUG 时，找“上传前本地视频”。
+记录宽高、帧率、编码及字节数；不要把本地视频的签名下载地址贴到公开 Issue。
+也可以在容器内对本地缓存运行：
+
+```sh
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,r_frame_rate,codec_name \
+  -show_entries format=size -of json /绝对路径/视频.mp4
+```
+
+本 Fork 保持抖音解析逻辑；音频转 AAC-LC 使用视频 copy。
+测试检查了真实 1080×1920 / 30 FPS 合成视频在合并、音频转换前后的压缩视频流哈希相同。
+AstrBot 4.29.3 的 `qqofficial_message_event.py` 本地小文件上传使用原字节 base64；大文件转给 `QQOfficialChunkedUploader` 分片，无视频缩放步骤。
+OneBot v11 的视频组件保持文件 URI。生产环境 NapCat 需能访问相同文件或正确挂载目录。
+这些结论不代表已经实测 QQ 服务端的最终文件；平台可能转码、限额或拒绝格式，插件无法指定最终保存分辨率。
+
+## 自动化测试与线上验收分界
+
+测试入口：`python -m pytest -q`；依赖：`requirements.txt`、`requirements-test.txt`，系统 `ffmpeg`/`ffprobe`。
+CI 工作流在 Python 3.12 下覆盖 bilibili-api-python 17.4.1 与 17.4.2，安装 AstrBot 4.29.3。
+本次本地执行结果：Python 3.12.14 / AstrBot 4.29.3 下，bilibili-api-python 17.4.1 与 17.4.2
+分别 **99 passed**；`compileall`、Ruff F/E9 和 `git diff --check` 通过。
+启用 `-W error::ResourceWarning` 后没有资源泄漏警告；仅 AstrBot 自身 `audioop` 的 Python 3.13 弃用提示。
+测试没有调用真实 B站、没有扫码真实账号、没有向 QQ 或 NapCat 发送消息。
+GitHub Actions 的远端执行状态需在 PR Checks 中查看，本地通过不等于远端 CI 已运行。
+
+| 验证领域 | 自动化方式 |
+| --- | --- |
+| HTTP 412 配置 | 本地服务按 UA 返回 412/200，经过真实 bilibili-api Api 请求路径；另启动真实 worker 验证主进程配置不变 |
+| 567/不可达/备用失败 | 本地 HTTP 状态模拟、无监听端口，检查次数及清晰错误 |
+| 大文件续传 | 73,745,233 bytes 流在 43,122,045 bytes 处中断，验证 Range 精确偏移及最终 SHA-256 |
+| Range 异常 | 200 忽略、416、错误起点/总长度/ETag/格式/长度、跨 CDN 验证器限制 |
+| 取消/并发/清理 | 停止下载器、重新实例化继续、并发单写入、缓存篡改检测、过期和体积清理 |
+| 大小和未知长度 | 已知/未知 Content-Length 超限、正常 chunked 结束 |
+| 缓存与画质 | 旧 BV 缓存隔离、480P/1080P/编码区别、MP4 上限、刷新后变化拒绝 |
+| 合并和发送 | 真 FFmpeg copy 哈希对比、音频转换保留分辨率、取消回收、下载失败提示、拒发 `.part` |
+| 登录退出 | Mock 两种扫码 Cookie 响应、0600、重复退出、配置保存、迟到扫码/刷新阻断 |
+| AstrBot/QQ/OneBot | 真实 4.29.3 导入/初始化/注销、真实权限过滤器、Mock QQ 上传字节对比、OneBot URI |
+| 其他平台 | 原有 Cookie/QZone/JSON 测试，抖音/快手经过真实通用下载器的本地模拟回归 |
+
+上线后仍应由管理员依次验证：匿名短视频 → 登录后相同视频实际画质 → 大文件断流 → QQ/NapCat 发送 → `/blogout` → 再次匿名解析。
+如需要排查版本问题，先记录 commit、Python/AstrBot/bilibili-api 版本、实际流信息、域名与错误码。
+不要提供 Cookie、SESSDATA、Access Token、完整签名 URL、二维码或生产数据库。
+
+## 已知剩余风险
+
+- B站风控、账号权限、地区及 CDN 策略会变化；默认 UA 只是一种兼容配置，不是长期通行保证。
+- 新 CDN 域名不在安全名单时会被拒绝，需要维护者核实官方来源后添加；代理会影响 DNS 和路径，应仅使用信任的管理员代理。
+- ETag/Last-Modified 缺失、签名过期、资源更新和 Range 不支持可能触发安全重下或需要重新解析。
+- 真实扫码/刷新、完整 Docker 运维、真实 B站大视频和 QQ/NapCat 网络传输未由这些本地测试验证。
+- 合成媒体测试及包结构探测不能覆盖所有容器/编码组合；QQ 对 HEVC/AV1 等的接受程度及服务端压缩由平台决定，AVC 通常更便于排查。
+- API 子进程有额外资源开销；严格禁用子进程的宿主环境不适用。缓存锁以单进程单数据目录为边界。

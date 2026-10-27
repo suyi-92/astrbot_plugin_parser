@@ -4,9 +4,19 @@
     "enable": true,
     "use_proxy": false,
     "cookies": "",
-    "video_codecs": "AVC",
     "video_quality": "_720P",
-    "block_pcdn": false
+    "block_pcdn": false,
+    "video_codec_list": [
+      "AVC"
+    ],
+    "api_client": "aiohttp",
+    "api_user_agent": "curl/8.14.1",
+    "auto_buvid": false,
+    "connect_timeout": 15,
+    "read_timeout": 60,
+    "task_timeout": 900,
+    "partial_expire_hours": 24,
+    "cache_expire_hours": 24
   },
   {
     "__template_key": "douyin",
@@ -31,14 +41,6 @@
     "enable": true,
     "use_proxy": false,
     "cookies": ""
-  },
-  {
-    "__template_key": "jmcomic",
-    "enable": true,
-    "use_proxy": false,
-    "image_send_mode": "pdf",
-    "nsfw": "blur",
-    "max_page": 50
   },
   {
     "__template_key": "xiaoheihe",

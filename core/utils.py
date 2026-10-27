@@ -48,14 +48,63 @@ async def exec_ffmpeg_cmd(cmd: list[str]) -> None:
         process = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        _, stderr = await process.communicate()
+        try:
+            _, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.communicate()
+            raise
         return_code = process.returncode
     except FileNotFoundError:
         raise RuntimeError("ffmpeg 未安装或无法找到可执行文件")
 
     if return_code != 0:
-        error_msg = stderr.decode().strip()
-        raise RuntimeError(f"ffmpeg 执行失败: {error_msg}")
+        # stderr may contain source URLs, headers or metadata; never propagate it.
+        raise RuntimeError(f"ffmpeg 执行失败（退出码 {return_code}）")
+
+
+async def probe_media(path: Path, *, strict=False) -> dict:
+    """Read local stream properties without transcoding; cancel/reap ffprobe."""
+    from .exception import DownloadException
+
+    process = None
+    try:
+        async with asyncio.timeout(30):
+            process = await asyncio.create_subprocess_exec(
+                "ffprobe",
+                "-v",
+                "error",
+                *(["-count_packets"] if strict else []),
+                "-show_entries",
+                "stream=codec_type,codec_name,profile,width,height,r_frame_rate:format=duration,size",
+                "-of",
+                "json",
+                str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await process.communicate()
+            data = json.loads(out)
+            if process.returncode or err or not data.get("streams"):
+                raise ValueError("invalid media")
+            return data
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        if strict:
+            raise DownloadException("媒体完整性检查失败或 ffprobe 不可用") from None
+        return {}
+    finally:
+        if process and process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.communicate()
 
 
 async def merge_av(
@@ -183,73 +232,67 @@ async def encode_video_to_h264(video_path: Path) -> Path:
 
 
 async def transcode_video_audio_to_lc(path: Path) -> Path:
-    """把视频中非 AAC-LC 的音频转码为标准 AAC-LC，保持视频流 copy。
+    """Convert audio only, publish atomically and keep the original cache valid."""
+    from .resumable import digest_file, file_lock, read_json, write_json
 
-    用于解决 QQ 等平台因音频 profile（如 HE-AACv2）导致的视频无法正常渲染问题。
-    """
-    try:
-        probe = await asyncio.create_subprocess_exec(
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=profile",
-            "-of",
-            "default=nw=1:nk=1",
-            str(path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await probe.communicate()
-        profile = (out or b"").decode(errors="ignore").strip()
-    except Exception as e:
-        logger.warning(f"[视频] ffprobe 探测失败，跳过转码: {e}")
-        return path
-
-    if not profile or profile.lower() in ("lc", "aac_lc", "aac lc"):
-        return path
-
-    out_path = path.with_name(f"{path.stem}_lc.mp4")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-i",
-            str(path),
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-profile:a",
-            "aac_low",
-            "-movflags",
-            "+faststart",
-            str(out_path),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-    except Exception as e:
-        logger.warning(f"[视频] ffmpeg 调用异常，跳过转码: {e}")
-        return path
-
-    if proc.returncode != 0 or not out_path.exists():
-        logger.warning(
-            f"[视频] 音频转码失败(profile={profile})，改用原文件: "
-            f"{(err or b'')[:200]!r}"
-        )
-        return path
-
-    logger.info(
-        f"[视频] 音频 {profile} -> AAC-LC 完成: {out_path.name} "
-        f"({out_path.stat().st_size} bytes)"
+    data = await probe_media(path)
+    audio = next(
+        (s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {}
     )
-    await safe_unlink(path)
-    return out_path
+    profile = audio.get("profile", "")
+    if not audio or (
+        audio.get("codec_name") == "aac"
+        and profile.lower() in ("lc", "aac_lc", "aac lc")
+    ):
+        return path
+    output = path.with_name(f"{path.stem}_lc.mp4")
+    receipt = output.with_suffix(".audio.json")
+    partial = output.with_name(output.name + ".part.mp4")
+    async with file_lock(output):
+        source = {
+            "size": path.stat().st_size,
+            "sha256": await asyncio.to_thread(digest_file, path),
+        }
+        if (
+            output.exists()
+            and output.stat().st_size > 0
+            and read_json(receipt) == source
+        ):
+            output.touch()
+            receipt.touch()
+            return output
+        try:
+            await exec_ffmpeg_cmd(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(path),
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-profile:a",
+                    "aac_low",
+                    "-movflags",
+                    "+faststart",
+                    str(partial),
+                ]
+            )
+            await probe_media(partial, strict=True)
+            partial.replace(output)
+            write_json(receipt, source)
+            logger.info(f"视频音频转换为 AAC-LC（视频流 copy）：{output.name}")
+            return output
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("视频音频转换失败，保留原始视频发送")
+            return path
+        finally:
+            partial.unlink(missing_ok=True)
 
 
 def fmt_size(file_path: Path) -> str:

@@ -1,8 +1,17 @@
-from asyncio import Task, TimeoutError, create_task, gather, sleep, to_thread
+from asyncio import (
+    CancelledError,
+    Task,
+    TimeoutError,
+    create_task,
+    gather,
+    sleep,
+    to_thread,
+)
 from collections.abc import Callable, Coroutine
 from functools import wraps
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
+from urllib.parse import urlsplit
 
 import aiofiles
 import yt_dlp
@@ -21,6 +30,7 @@ from .exception import (
     SizeLimitException,
     ZeroSizeException,
 )
+from .resumable import file_lock
 from .utils import LimitedSizeDict, generate_file_name, merge_av, safe_unlink
 
 P = ParamSpec("P")
@@ -33,8 +43,16 @@ def auto_task(func: Callable[P, Coroutine[Any, Any, T]]) -> Callable[P, Task[T]]
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> Task[T]:
         coro = func(*args, **kwargs)
-        name = " | ".join(str(arg) for arg in args if isinstance(arg, str))
-        return create_task(coro, name=func.__name__ + " | " + name)
+        owner = args[0] if args else None
+        if getattr(owner, "_closed", False):
+            coro.close()
+            raise DownloadException("下载器已停止")
+        task = create_task(coro, name=func.__name__)
+        if hasattr(owner, "_tasks"):
+            owner._tasks.add(task)
+            task.add_done_callback(owner._tasks.discard)
+            task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+        return task
 
     return wrapper
 
@@ -67,6 +85,8 @@ class Downloader:
 
     def __init__(self, config: PluginConfig):
         self.cfg = config
+        self._tasks = set()
+        self._closed = False
         self.max_size = self.cfg.source_max_size
         self.default_headers: dict[str, str] = COMMON_HEADER.copy()
         # 视频信息缓存
@@ -78,6 +98,11 @@ class Downloader:
 
     async def close(self):
         """关闭网络客户端"""
+        self._closed = True
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await gather(*tasks, return_exceptions=True)
         await self.client.close()
 
     @auto_task
@@ -93,10 +118,15 @@ class Downloader:
         if not file_name:
             file_name = generate_file_name(url)
         file_path = self.cfg.cache_dir / file_name
-        # 如果文件存在，则直接返回
-        if file_path.exists():
+        async with file_lock(file_path):
+            return await self._streamd(url, file_path, headers, proxy)
+
+    async def _streamd(self, url, file_path, headers, proxy):
+        if file_path.is_file() and file_path.stat().st_size > 0:
             return file_path
+        part = file_path.with_name(file_path.name + ".part")
         headers = headers or self.default_headers
+        proxy = None if proxy is ... else proxy
         retries = self.cfg.download_retry_times
         for attempt in range(retries + 1):
             try:
@@ -104,22 +134,16 @@ class Downloader:
                     url, headers=headers, allow_redirects=True, proxy=proxy
                 ) as response:
                     if response.status >= 400:
-                        raise ClientError(f"HTTP {response.status} {response.reason}")
+                        raise ClientError(f"HTTP {response.status}")
                     content_length = response.content_length
                     max_bytes = self.max_size * 1024 * 1024
-
                     if content_length == 0:
-                        logger.warning(f"媒体 url: {url}, 大小为 0, 取消下载")
                         raise ZeroSizeException
                     if content_length and content_length > max_bytes:
-                        logger.warning(
-                            f"媒体 url: {url} 大小 {content_length / 1024 / 1024:.2f} MB 超过 {self.max_size} MB, 取消下载"
-                        )
                         raise SizeLimitException
-
                     downloaded = 0
-                    with self.get_progress_bar(file_name, content_length) as bar:
-                        async with aiofiles.open(file_path, "wb") as file:
+                    with self.get_progress_bar(file_path.name, content_length) as bar:
+                        async with aiofiles.open(part, "wb") as file:
                             async for chunk in response.content.iter_chunked(
                                 1024 * 1024
                             ):
@@ -128,26 +152,29 @@ class Downloader:
                                     raise SizeLimitException
                                 await file.write(chunk)
                                 bar.update(len(chunk))
-
                     if downloaded == 0:
-                        logger.warning(f"媒体 url: {url}, 实际大小为 0, 取消下载")
                         raise ZeroSizeException
-                    if content_length and downloaded < content_length:
-                        raise ClientError(
-                            f"HTTP payload incomplete {downloaded}/{content_length}"
-                        )
-
+                    if content_length and downloaded != content_length:
+                        raise ClientError("incomplete payload")
+                part.replace(file_path)
                 return file_path
-            except (ZeroSizeException, SizeLimitException):
-                await safe_unlink(file_path)
+            except (ZeroSizeException, SizeLimitException, CancelledError):
+                await safe_unlink(part)
                 raise
             except (ClientError, TimeoutError) as exc:
-                await safe_unlink(file_path)
+                await safe_unlink(part)
                 if attempt < retries:
                     await sleep(1 + attempt)
                     continue
-                logger.exception(f"下载失败 | url: {url}, file_path: {file_path}")
-                raise DownloadException("媒体下载失败") from exc
+                logger.warning(
+                    f"媒体下载失败: {urlsplit(url).hostname} {type(exc).__name__}"
+                )
+                raise DownloadException("媒体下载失败") from None
+            except OSError:
+                await safe_unlink(part)
+                raise DownloadException(
+                    "媒体缓存写入失败，请检查磁盘空间及权限"
+                ) from None
         raise DownloadException("媒体下载失败")
 
     @staticmethod
@@ -255,10 +282,17 @@ class Downloader:
         """
         download video and audio file by url with stream and merge
         """
-        v_path, a_path = await gather(
+        tasks = [
             self.download_video(v_url, headers=headers, proxy=proxy),
             self.download_audio(a_url, headers=headers, proxy=proxy),
-        )
+        ]
+        try:
+            v_path, a_path = await gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await gather(*tasks, return_exceptions=True)
         await merge_av(v_path=v_path, a_path=a_path, output_path=output_path)
         return output_path
 
