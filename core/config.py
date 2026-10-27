@@ -150,6 +150,18 @@ class ConfigNodeContainer:
 # ================ 插件自定义配置 ==================
 
 
+BILIBILI_DEFAULTS = {
+    "api_client": "aiohttp",
+    "api_user_agent": "curl/8.14.1",
+    "auto_buvid": False,
+    "connect_timeout": 15,
+    "read_timeout": 60,
+    "task_timeout": 900,
+    "partial_expire_hours": 24,
+    "cache_expire_hours": 24,
+}
+
+
 class ParserItem(ConfigNode):
     __template_key: str
     enable: bool
@@ -165,6 +177,14 @@ class ParserItem(ConfigNode):
     video_quality: str | None
     video_codec: str | None
     video_format: str | None
+    api_client: str | None
+    api_user_agent: str | None
+    auto_buvid: bool | None
+    connect_timeout: int | None
+    read_timeout: int | None
+    task_timeout: int | None
+    partial_expire_hours: int | None
+    cache_expire_hours: int | None
     block_pcdn: bool | None
     metube_url: str | None
     wait_timeout: int | None
@@ -204,6 +224,14 @@ class ParserConfig(ConfigNodeContainer):
     qzone: ParserItem
 
     def __init__(self, nodes: list[dict[str, Any]]):
+        for node in nodes:
+            if node.get("__template_key") == "bilibili":
+                for key, value in BILIBILI_DEFAULTS.items():
+                    if node.get(key) is None:
+                        node[key] = value
+                # Preserve the old single-codec template without changing other platforms.
+                if "video_codec_list" not in node:
+                    node["video_codec_list"] = [node.get("video_codecs") or "AVC"]
         super().__init__(nodes, item_cls=ParserItem)
 
     def platforms(self) -> list[str]:
@@ -229,6 +257,7 @@ class PluginConfig(ConfigNode):
     single_heavy_render_card: bool
     forward_threshold: int
 
+    debug_media_info: bool
     show_download_fail_tip: bool
     download_timeout: int
     download_retry_times: int
@@ -241,7 +270,9 @@ class PluginConfig(ConfigNode):
     parsers_template: list[dict[str, Any]]
 
     _plugin_name = "astrbot_plugin_parser"
+
     def __init__(self, config: AstrBotConfig, context: Context):
+        config.setdefault("debug_media_info", False)
         super().__init__(config)
         self.context = context
         self.admins_id = self.context.get_config().get("admins_id", [])

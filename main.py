@@ -19,7 +19,9 @@ from .core.clean import CacheCleaner
 from .core.config import PluginConfig
 from .core.debounce import Debouncer
 from .core.download import Downloader
+from .core.exception import ParseException
 from .core.parsers import BaseParser, BilibiliParser
+from .core.parsers.bilibili.login import BilibiliLogin
 from .core.render import Renderer
 from .core.sender import MessageSender
 from .core.utils import extract_json_url
@@ -43,6 +45,7 @@ class ParserPlugin(Star):
         self.cleaner = CacheCleaner(self.cfg)
         # 关键词 -> Parser 映射
         self.parser_map: dict[str, BaseParser] = {}
+        self._offline_bili_login = None
         # 关键词 -> 正则 列表
         self.key_pattern_list: list[tuple[str, re.Pattern[str]]] = []
 
@@ -55,12 +58,14 @@ class ParserPlugin(Star):
 
     async def terminate(self):
         """插件卸载时触发"""
-        # 关下载器里的会话
-        await self.downloader.close()
+        await self.sender.close()
         # 关所有解析器里的会话 (去重后的实例)
         unique_parsers = set(self.parser_map.values())
         for parser in unique_parsers:
             await parser.close_session()
+        if self._offline_bili_login:
+            await self._offline_bili_login.close()
+        await self.downloader.close()
         # 关缓存清理器
         await self.cleaner.stop()
 
@@ -111,6 +116,15 @@ class ParserPlugin(Star):
                 return parser
         raise ValueError(f"未找到类型为 {parser_type} 的 parser 实例")
 
+    def _get_bilibili_login(self):
+        for parser in self.parser_map.values():
+            if isinstance(parser, BilibiliParser):
+                return parser.login
+        # Administrators can still remove local credentials when parsing is disabled.
+        if self._offline_bili_login is None:
+            self._offline_bili_login = BilibiliLogin(self.cfg)
+        return self._offline_bili_login
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """消息的统一入口"""
@@ -129,7 +143,6 @@ class ParserPlugin(Star):
         if not chain:
             return
 
-        seg1 = chain[0]
         text = event.message_str
 
         # 指定机制：专门@其他bot的消息不解析
@@ -220,7 +233,11 @@ class ParserPlugin(Star):
             return
 
         # 解析
-        parse_res = await self.parser_map[keyword].parse(keyword, searched)
+        try:
+            parse_res = await self.parser_map[keyword].parse(keyword, searched)
+        except ParseException as exc:
+            await event.send(event.plain_result(str(exc)))
+            return
 
         # 基于资源ID防抖
         resource_id = parse_res.get_resource_id()
@@ -251,11 +268,40 @@ class ParserPlugin(Star):
     @filter.command("登录B站", alias={"blogin", "登录b站"})
     async def login_bilibili(self, event: AstrMessageEvent):
         """扫码登录B站"""
-        parser: BilibiliParser = self._get_parser_by_type(BilibiliParser)  # type: ignore
-        qrcode = await parser.login.login_with_qrcode()
-        yield event.chain_result([Image.fromBytes(qrcode)])
-        async for msg in parser.login.check_qr_state():
-            yield event.plain_result(msg)
+        login = self._get_bilibili_login()
+        try:
+            qrcode = await login.login_with_qrcode()
+            yield event.chain_result([Image.fromBytes(qrcode)])
+            async for msg in login.check_qr_state():
+                yield event.plain_result(msg)
+        except ParseException as exc:
+            yield event.plain_result(str(exc))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("blogout", alias={"退出B站", "退出b站"})
+    async def logout_bilibili(self, event: AstrMessageEvent):
+        """只清除本插件本地登录态，不注销B站服务器端其他设备。"""
+        login = self._get_bilibili_login()
+        try:
+            existed = await login.logout()
+            yield event.plain_result(
+                "已清除本插件的B站本地凭证及扫码状态"
+                if existed
+                else "当前没有B站本地登录凭证，扫码状态已清除"
+            )
+        except ParseException as exc:
+            yield event.plain_result(str(exc))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("bstatus")
+    async def status_bilibili(self, event: AstrMessageEvent):
+        """只报告本地凭证是否存在，不验证服务器端会话。"""
+        present = self._get_bilibili_login().has_local_credential()
+        yield event.plain_result(
+            "存在B站本地登录凭证（未验证服务器端有效性）"
+            if present
+            else "没有B站本地登录凭证，使用匿名解析"
+        )
 
     async def parse_url(self, url: str):
         """供其他插件调用的公开解析 API：传入 URL 解析并返回 ParseResult 对象"""
@@ -281,5 +327,5 @@ class ParserPlugin(Star):
             await self.parse_and_send(event, url)
             return "链接解析成功并已发送"
         except Exception as e:
-            logger.error(f"[LLM Tool] 解析链接失败: {url}, error: {e}")
-            return f"解析链接失败: {e}"
+            logger.error(f"[LLM Tool] 解析链接失败: {type(e).__name__}")
+            return "解析链接失败，请检查网络、下载限制和平台登录状态"

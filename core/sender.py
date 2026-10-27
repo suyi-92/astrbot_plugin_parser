@@ -1,3 +1,4 @@
+import asyncio
 from itertools import chain
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from .exception import (
     ZeroSizeException,
 )
 from .render import Renderer
-from .utils import transcode_video_audio_to_lc
+from .utils import probe_media, transcode_video_audio_to_lc
 
 
 class MessageSender:
@@ -55,6 +56,16 @@ class MessageSender:
     def __init__(self, config: PluginConfig, renderer: Renderer):
         self.cfg = config
         self.renderer = renderer
+        self.tasks = set()
+        self.closed = False
+
+    async def close(self):
+        """Stop sends and any audio-conversion subprocess awaited by them on reload."""
+        self.closed = True
+        tasks = [t for t in self.tasks if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _to_file_uri(self, path: Path) -> str:
         if not path.is_absolute():
@@ -114,7 +125,9 @@ class MessageSender:
         media_count = len(light) + len(heavy)
 
         # 达到阈值后，强制合并转发，避免刷屏
-        force_merge = (media_count + (1 if render_card else 0)) >= self.cfg.forward_threshold
+        force_merge = (
+            media_count + (1 if render_card else 0)
+        ) >= self.cfg.forward_threshold
         if force_merge_override is not None:
             force_merge = force_merge_override
 
@@ -181,9 +194,18 @@ class MessageSender:
                 path: Path = await cont.get_path()
             except (DownloadLimitException, ZeroSizeException):
                 continue
-            except DownloadException:
-                if self.cfg.show_download_fail_tip:
-                    segs.append(Plain("此项媒体下载失败"))
+            except DownloadException as exc:
+                if (
+                    result.platform.name == "bilibili"
+                    or self.cfg.show_download_fail_tip
+                ):
+                    segs.append(
+                        Plain(
+                            str(exc)
+                            if result.platform.name == "bilibili"
+                            else "此项媒体下载失败"
+                        )
+                    )
                 continue
 
             match cont:
@@ -202,7 +224,10 @@ class MessageSender:
             try:
                 path: Path = await cont.get_path()
             except (SizeLimitException, DurationLimitException) as exc:
-                if self.cfg.show_download_fail_tip:
+                if (
+                    result.platform.name == "bilibili"
+                    or self.cfg.show_download_fail_tip
+                ):
                     message = (
                         "此项媒体超过时长限制"
                         if isinstance(exc, DurationLimitException)
@@ -210,14 +235,42 @@ class MessageSender:
                     )
                     segs.append(Plain(message))
                 continue
-            except DownloadException:
-                if self.cfg.show_download_fail_tip:
-                    segs.append(Plain("此项媒体下载失败"))
+            except DownloadException as exc:
+                if (
+                    result.platform.name == "bilibili"
+                    or self.cfg.show_download_fail_tip
+                ):
+                    segs.append(
+                        Plain(
+                            str(exc)
+                            if result.platform.name == "bilibili"
+                            else "此项媒体下载失败"
+                        )
+                    )
                 continue
 
+            if ".part" in path.name or not path.is_file() or not path.stat().st_size:
+                segs.append(Plain("媒体文件尚未完成，未发送"))
+                continue
             match cont:
                 case VideoContent() | DynamicContent():
                     path = await transcode_video_audio_to_lc(path)
+                    if path.stat().st_size > self.cfg.max_size:
+                        segs.append(Plain("此项媒体超过大小限制"))
+                        continue
+                    if self.cfg.debug_media_info:
+                        data = await probe_media(path)
+                        stream = next(
+                            (
+                                s
+                                for s in data.get("streams", [])
+                                if s.get("codec_type") == "video"
+                            ),
+                            {},
+                        )
+                        logger.debug(
+                            f"上传前本地视频: bytes={path.stat().st_size}, stream={stream}"
+                        )
                     segs.append(self._video_from_path(path))
                 case AudioContent():
                     segs.append(
@@ -298,7 +351,9 @@ class MessageSender:
             return True
         except Exception as e:
             seg_meta = self._collect_seg_meta(segs)
-            logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
+            logger.error(
+                f"发送解析结果失败： error={type(e).__name__}, segments={seg_meta}"
+            )
             return False
 
     @staticmethod
@@ -311,13 +366,33 @@ class MessageSender:
             for attr in ("file", "path", "url"):
                 value = getattr(seg, attr, None)
                 if value:
-                    item["media"] = str(value)
+                    item["media"] = "present"
                     break
             meta.append(item)
 
         return meta
 
     async def send_parse_result(
+        self,
+        event: AstrMessageEvent,
+        result: ParseResult,
+    ):
+        if self.closed:
+            raise DownloadException("消息发送器已停止")
+        task = asyncio.create_task(
+            self._send_parse_result(event, result), name="parser-send"
+        )
+        self.tasks.add(task)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if self.closed:
+                return False
+            raise
+        finally:
+            self.tasks.discard(task)
+
+    async def _send_parse_result(
         self,
         event: AstrMessageEvent,
         result: ParseResult,
@@ -348,5 +423,7 @@ class MessageSender:
                 await event.send(event.chain_result(segs))
             except Exception as e:
                 seg_meta = self._collect_seg_meta(segs)
-                logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
+                logger.error(
+                    f"发送解析结果失败： error={type(e).__name__}, segments={seg_meta}"
+                )
             return

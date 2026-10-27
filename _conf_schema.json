@@ -87,7 +87,7 @@
     },
     "show_download_fail_tip": {
         "description": "提示下载失败项",
-        "hint": "关闭后将不再发送与下载失败相关的提示（如“此项媒体下载失败”、“超过文件大小限制”等）",
+        "hint": "关闭后将不再发送与下载失败相关的提示（如“此项媒体下载失败”、“超过文件大小限制”等） B站下载/合并失败始终返回简短提示。",
         "type": "bool",
         "default": true
     },
@@ -177,7 +177,7 @@
                     },
                     "video_quality": {
                         "description": "B站视频分辨率",
-                        "hint": "下载B站视频的分辨率, 高画质可能需要登录才能下载成功",
+                        "hint": "最高画质上限；仅选择 API 实际提供的流。未登录可能只有 480P，失败不会自动降画质。",
                         "type": "string",
                         "options": [
                             "_360P",
@@ -209,9 +209,62 @@
                     },
                     "block_pcdn": {
                         "description": "屏蔽 P/MCDN",
-                        "hint": "剔除B站返回的PCDN、MCDN节点链接，提升下载速度",
+                        "hint": "排除已识别的 P/MCDN；全部被排除时明确报错，不回退到被屏蔽节点。",
                         "type": "bool",
                         "default": false
+                    },
+                    "api_client": {
+                        "description": "B站 API 请求客户端",
+                        "type": "string",
+                        "default": "aiohttp",
+                        "hint": "仅在专用子进程中生效，不改变其他插件的 bilibili-api 设置。",
+                        "options": [
+                            "aiohttp",
+                            "httpx",
+                            "curl_cffi"
+                        ]
+                    },
+                    "api_user_agent": {
+                        "description": "B站 API User-Agent",
+                        "type": "string",
+                        "default": "curl/8.14.1",
+                        "hint": "此组合在部分 VPS 验证可用，不保证所有网络永久有效。"
+                    },
+                    "auto_buvid": {
+                        "description": "B站自动获取 buvid",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "关闭以采用已验证的兼容配置；登录不是必须条件。"
+                    },
+                    "connect_timeout": {
+                        "description": "B站 CDN 连接超时（秒）",
+                        "type": "int",
+                        "default": 15,
+                        "hint": "TCP/TLS 连接等待上限。"
+                    },
+                    "read_timeout": {
+                        "description": "B站 CDN 读取空闲超时（秒）",
+                        "type": "int",
+                        "default": 60,
+                        "hint": "连续没有收到数据的时间；不是整个文件传输时间。"
+                    },
+                    "task_timeout": {
+                        "description": "B站下载任务总上限（秒）",
+                        "type": "int",
+                        "default": 900,
+                        "hint": "包括等待缓存锁、下载、退避、地址刷新、FFmpeg 合并。download_timeout 仍是单次请求上限，超时可从断点恢复。"
+                    },
+                    "partial_expire_hours": {
+                        "description": "B站未完成下载保留小时数",
+                        "type": "int",
+                        "default": 24,
+                        "hint": "启动时及每小时清理不活跃的过期 .part；过多残片也会被清理。"
+                    },
+                    "cache_expire_hours": {
+                        "description": "B站完整缓存保留小时数",
+                        "type": "int",
+                        "default": 24,
+                        "hint": "按最后使用时间清理，不复用旧版仅 BV 命名的缓存。"
                     }
                 }
             },
@@ -739,5 +792,11 @@
                 }
             }
         }
+    },
+    "debug_media_info": {
+        "description": "发送前记录本地视频信息（DEBUG）",
+        "type": "bool",
+        "default": false,
+        "hint": "记录宽高、帧率、编码、字节数；需日志等级 DEBUG。不改变 QQ 服务端转码。"
     }
 }
