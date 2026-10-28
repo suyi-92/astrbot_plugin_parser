@@ -16,12 +16,14 @@ from urllib.parse import urlencode, urlsplit
 import aiohttp
 import pytest
 from aiohttp import web
+from aiohttp.resolver import DefaultResolver
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, x25519
 from cryptography.x509.oid import NameOID
 
 from parser_under_test.core import vless_proxy as mod
+from parser_under_test.core import diagnostics as diag, resumable
 from parser_under_test.core.parsers.bilibili.api import BilibiliAPI
 from test_vless_proxy import NODE_ID, node
 
@@ -238,19 +240,41 @@ async def test_actual_vless_tunnel_https_auth_and_shutdown(
     original = cfg.proxy
     cfg.parser.bilibili.use_proxy = True
     cfg.proxy_xray_path = xray
+    cfg.debug_media_info = True
+    logs = []
+    monkeypatch.setattr(diag.logger, "debug", logs.append)
+    # Synthetic loopback media and a local test CA only. Production continues
+    # checking public CDN addresses and validating real TLS certificates.
+    monkeypatch.setattr(resumable, "validate_media_url", lambda url: None)
+    monkeypatch.setattr(resumable.PublicResolver, "resolve", DefaultResolver.resolve)
     manager = mod.VlessProxy(cfg)
+    downloader = resumable.ResumableDownloader(cfg)
     try:
         async with core_process(xray, server):
             await manager.start()
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=15),
+                connector=aiohttp.TCPConnector(ssl=client_tls),
+                trust_env=False,
             ) as session:
-                async with session.get(
-                    f"https://127.0.0.1:{target_port}/video",
+                downloader.client = session
+                path = await downloader.download(
+                    [f"https://127.0.0.1:{target_port}/video?sign=SYNTHETIC-SECRET"],
+                    downloader.directory / "fixture.mp4",
+                    resource="fixture:video",
                     proxy=manager.endpoint,
-                    ssl=client_tls,
-                ) as response:
-                    assert await response.read() == body
+                )
+                assert path.read_bytes() == body
+                response_log = next(line for line in logs if "CDN响应" in line)
+                assert "route=vless+xray" in response_log
+                assert "socket_peer=loopback proxy_socket=confirmed" in response_log
+                for secret in (
+                    NODE_ID,
+                    "SYNTHETIC-SECRET",
+                    "vless://",
+                    "http://parser:",
+                ):
+                    assert secret not in "\n".join(logs)
                 endpoint = urlsplit(manager.endpoint)
                 async with session.get(
                     "http://parser-probe.invalid/",
@@ -265,6 +289,7 @@ async def test_actual_vless_tunnel_https_auth_and_shutdown(
             with pytest.raises(mod.ProxyError):
                 mod.get_proxy(cfg)
     finally:
+        await downloader.close()
         await manager.close()
         await runner.cleanup()
 

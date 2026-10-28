@@ -10,6 +10,7 @@ import qrcode
 from bilibili_api import Credential
 from aiohttp import ClientSession, ClientTimeout
 
+from ...diagnostics import note, proxy_route, response_peer
 from ...exception import ParseException
 from ...vless_proxy import get_proxy
 
@@ -216,6 +217,10 @@ class BilibiliLogin:
                 "User-Agent": options.api_user_agent,
                 "Referer": "https://www.bilibili.com/",
             }
+            proxy = get_proxy(self.cfg) if options.use_proxy else None
+            debug = self.cfg.debug_media_info
+            route = proxy_route(self.cfg, proxy) if debug else ""
+            note(debug, f"B站扫码代理路由 {route}")
             async with ClientSession(
                 headers=headers, timeout=ClientTimeout(total=15)
             ) as session:
@@ -223,8 +228,13 @@ class BilibiliLogin:
                     url,
                     params=params,
                     allow_redirects=False,
-                    proxy=get_proxy(self.cfg) if options.use_proxy else None,
+                    proxy=proxy,
                 ) as response:
+                    if debug:
+                        note(
+                            True,
+                            f"B站扫码响应 {route} {response_peer(response, proxy)} status={response.status}",
+                        )
                     if response.status != 200:
                         raise ParseException(
                             f"B站扫码请求失败（HTTP {response.status}），请稍后重试"

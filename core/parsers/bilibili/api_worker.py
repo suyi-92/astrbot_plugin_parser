@@ -99,6 +99,11 @@ async def main():
                 request = json.loads(line)
                 async with asyncio.timeout(request["settings"].get("timeout", 15)):
                     response = {"data": await dispatch(request)}
+                    # Report what the worker's library actually applied, without
+                    # returning the proxy URL or its authentication information.
+                    from bilibili_api import request_settings
+
+                    response["proxy_enabled"] = bool(request_settings.get_proxy())
             except Exception as exc:
                 code = getattr(exc, "code", getattr(exc, "status", None))
                 response = {

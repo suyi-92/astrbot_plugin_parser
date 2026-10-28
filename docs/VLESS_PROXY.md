@@ -63,6 +63,39 @@ VPS → VLESS 节点 → CDN 的任一段都可能限速；优先用同一资源
 独立 `tools/bili_speedtest.sh` 仍只支持 HTTP 代理入口，不能把 VLESS 分享链接传给 `--proxy` / `--ask-proxy`。
 本功能管理的随机本地入口也不适合跨容器或跨机器共享；需要独立脚本测速时，使用自己管理的客户端 HTTP 入口。
 
+## 确认请求是否经过代理
+
+从 v1.6.5 起，保留原有「发送前记录本地视频信息（DEBUG）」开关，并把插件日志等级设为 DEBUG，保存后重载。
+不需要增加新字段、提供节点链接或清除缓存。选择一个未缓存的视频，按同一「解析诊断」编号观察这些字段（以下只是格式示例）：
+
+```text
+B站API代理路由 route=vless+xray use_proxy=on configured=vless xray=running
+B站API返回 route=vless+xray use_proxy=on configured=vless xray=running worker_proxy=on result=ok
+CDN请求 stream=video ... route=vless+xray use_proxy=on configured=vless xray=running
+CDN响应 stream=video ... route=vless+xray ... socket_peer=loopback proxy_socket=confirmed
+流接收完成 stream=video ... received_bytes=... avg_mib_s=... route=vless+xray ...
+平台上传路由 source=adapter plugin_proxy_applied=off（插件代理不接管适配器上传）
+```
+
+| 字段 | 含义与边界 |
+| --- | --- |
+| `route=vless+xray` | 该次请求实际传入了插件管理的 Xray 入口；通过与运行时入口匹配确定，不只检查配置中是否有 VLESS 链接 |
+| `route=http-proxy` | 该次请求传入普通 HTTP(S) 代理，未匹配插件管理的 Xray；外部代理内部可能如何转发，本插件不能判断 |
+| `route=direct` | 请求没有传入插件代理；结合 `use_proxy=off` 或 `configured=empty` 查开关/地址 |
+| `use_proxy=on/off`、`configured=vless/http/empty` | 当前加载的 B站代理开关与全局地址类型，不输出地址内容 |
+| `xray=running/stopped/not_used` | 记录时插件管理的进程状态；不是对远端节点健康或出口 IP 的探测 |
+| `worker_proxy=on/off` | 独立 API 进程读取 bilibili-api 实际请求设置后返回；确认库启用代理，不能等同于对每条 API 连接抓包 |
+| `socket_peer=loopback proxy_socket=confirmed` | 读取媒体响应的实际连接端，核对地址和端口命中传入的回环代理入口；和 `route=vless+xray` 同时出现时，确认连接到了本地 Xray。Xray 配置仅有 VLESS 出口、没有直连回退 |
+| `proxy_socket=unknown` | 响应可能已全部缓冲并释放连接，或外部代理使用域名而非 IP；没有足够证据，**不代表绕过代理**。诊断不会额外查询 DNS |
+| `proxy_socket=mismatch` | 可取得连接端，但与传入的数字 IP/端口不匹配；保留同编号日志排查，不能直接断言已直连 |
+| `plugin_proxy_applied=off` | 平台上传由 AstrBot 适配器处理，本插件代理未接管；没有假设适配器自身的代理配置 |
+
+扫码请求同样输出选定路由和可取得的连接证据；音频下载也有独立 `stream=audio` 行。
+缓存命中时跳过下载，没有 CDN 连接日志属于正常情况。诊断不输出节点地址、UUID、密码、密钥、签名媒体 URL 或 Cookie，也不调用第三方出口 IP 服务。
+
+响应头等待短、持续接收速度低，说明应优先排查持续传输吞吐，而不是盲目调大超时。候选原因包括 VPS 到节点的路径、节点带宽/负载、节点到 CDN 的路径，以及 CDN 对该资源/连接的策略；单份日志不能确定具体哪一段。
+`avg_mib_s` 按本次请求实际新收到的字节计算，含响应头等待及接收写入，不把续传旧字节当作新下载量。比较线路时保持视频、实际画质和测试时段尽量一致；下载与 QQ 上传分开看。
+
 ## 常见提示与回滚
 
 | 提示 / 现象 | 处理 |
@@ -85,5 +118,7 @@ VPS → VLESS 节点 → CDN 的任一段都可能限速；优先用同一资源
 还覆盖安装哈希错误、大小限制、取消清理、旧配置默认值、HTTP 兼容、B站 worker/扫码代理入口及 AstrBot 生命周期。
 测试入口：`XRAY_TEST_BINARY=/绝对路径/xray python -m pytest -q`；未提供内核路径时对应真实隧道测试会跳过。
 这些测试不连接用户的节点，不证明特定 VPS/CDN 的吞吐量；实际 B站和 QQ 效果需用户环境验证。
-本次完整套件结果为 **193 passed**，使用 AstrBot 4.29.3、Python 3.12、bilibili-api-python 17.4.2 和真实 Xray 26.10.21，未跳过真实隧道用例。
+v1.6.4 完整套件结果为 **193 passed**，使用 AstrBot 4.29.3、Python 3.12、bilibili-api-python 17.4.2 和真实 Xray 26.10.21，未跳过真实隧道用例。
+v1.6.5 在真实本地 Xray 隧道中调用 B站下载器核对实际连接日志，另测直连/HTTP 代理、API worker 回执、缺失连接信息、扫码和凭证脱敏；实际节点速度仍需用户环境验证。
+本地完整套件 **217 passed**，未跳过真实隧道用例；Python 语法、Ruff F/E9、Shell 语法和差异空白检查通过。
 官方压缩包的下载、哈希校验与安装也在隔离目录完成验证；测试环境需要宿主提供的网络出口，因此单次安装验证注入该出口，不代表用户容器直连 GitHub 一定可用。插件安装器本身直连官方源，失败时可使用已有内核路径。

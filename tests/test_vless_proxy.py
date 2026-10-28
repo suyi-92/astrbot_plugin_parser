@@ -319,12 +319,18 @@ async def test_installer_cancel_removes_partial_and_does_not_publish(cfg, monkey
 
 @pytest.mark.parametrize("enabled", [True, False])
 async def test_qr_request_uses_bridge_only_when_enabled(cfg, monkeypatch, enabled):
+    from parser_under_test.core import diagnostics as diag
     from parser_under_test.core.parsers.bilibili import login
 
+    cfg.debug_media_info = True
+    logs = []
+    monkeypatch.setattr(diag.logger, "debug", logs.append)
     cfg.proxy = node()
     cfg.parser.bilibili.use_proxy = enabled
     endpoint = "http://parser:synthetic@127.0.0.1:12345"
-    cfg._proxy_manager = SimpleNamespace(endpoint=endpoint)
+    cfg._proxy_manager = SimpleNamespace(
+        endpoint=endpoint, _endpoint=endpoint, process=SimpleNamespace(returncode=None)
+    )
     calls = []
 
     class Session:
@@ -357,6 +363,10 @@ async def test_qr_request_uses_bridge_only_when_enabled(cfg, monkeypatch, enable
         assert calls[0]["proxy"] == (endpoint if enabled else None)
         assert NODE_ID not in json.dumps(calls)
         assert "vless://" not in json.dumps(calls)
+        output = "\n".join(logs)
+        assert f"route={'vless+xray' if enabled else 'direct'}" in output
+        assert "socket_peer=unavailable" in output
+        assert "synthetic" not in output and NODE_ID not in output
     finally:
         await manager.close()
 

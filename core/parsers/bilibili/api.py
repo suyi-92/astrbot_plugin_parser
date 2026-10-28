@@ -10,6 +10,7 @@ import json
 import sys
 from pathlib import Path
 
+from ...diagnostics import note, proxy_route
 from ...exception import ParseException
 from ...vless_proxy import get_proxy
 
@@ -49,6 +50,9 @@ class BilibiliAPI:
             if generation != self.generation:
                 raise ParseException("B站旧请求已被退出登录取消，请重新解析")
             options = self.cfg.parser.bilibili
+            proxy = (get_proxy(self.cfg) or "") if options.use_proxy else ""
+            debug = self.cfg.debug_media_info
+            route = proxy_route(self.cfg, proxy) if debug else ""
             request = {
                 "action": action,
                 "params": params,
@@ -58,9 +62,10 @@ class BilibiliAPI:
                     "user_agent": options.api_user_agent,
                     "auto_buvid": options.auto_buvid,
                     "timeout": self.cfg.common_timeout,
-                    "proxy": (get_proxy(self.cfg) or "") if options.use_proxy else "",
+                    "proxy": proxy,
                 },
             }
+            note(debug, f"B站API代理路由 {route}")
             try:
                 async with asyncio.timeout(self.cfg.common_timeout + 5):
                     if self.process is None or self.process.returncode is not None:
@@ -93,6 +98,11 @@ class BilibiliAPI:
                     )
                 suffix = f"（{code}）" if isinstance(code, int) else ""
                 raise ParseException(f"B站 API 请求失败{suffix}，请检查网络或登录状态")
+            applied = response.get("proxy_enabled")
+            worker_proxy = (
+                "on" if applied is True else "off" if applied is False else "unknown"
+            )
+            note(debug, f"B站API返回 {route} worker_proxy={worker_proxy} result=ok")
             return response["data"]
 
 

@@ -21,7 +21,7 @@ from aiohttp.resolver import DefaultResolver
 
 from astrbot.api import logger
 
-from .diagnostics import TransferProgress, note, stage
+from .diagnostics import TransferProgress, note, proxy_route, response_peer, stage
 from .exception import DownloadException, SizeLimitException, ZeroSizeException
 
 MEDIA_DOMAINS = (
@@ -370,18 +370,21 @@ class ResumableDownloader:
                 send_headers["Range"] = f"bytes={offset}-"
                 send_headers["If-Range"] = etag if strong else meta["modified"]
             started = time.monotonic()
+            received = 0
+            route = proxy_route(self.cfg, proxy) if debug else ""
             note(
                 debug,
                 f"CDN请求 stream={stream} cdn={host} "
-                f"attempt={attempt + 1}/{self.cfg.download_retry_times + 1} resume_bytes={offset}",
+                f"attempt={attempt + 1}/{self.cfg.download_retry_times + 1} resume_bytes={offset} {route}",
             )
             try:
                 async with self._response(url, send_headers, proxy) as response:
                     status = response.status
+                    peer = response_peer(response, proxy) if debug else ""
                     note(
                         debug,
                         f"CDN响应 stream={stream} cdn={host} status={status} "
-                        f"headers_s={time.monotonic() - started:.2f}",
+                        f"headers_s={time.monotonic() - started:.2f} {route} {peer}",
                     )
                     if status in (412, 429):
                         raise DownloadException(
@@ -467,6 +470,7 @@ class ResumableDownloader:
                                 raise SizeLimitException
                             output.write(chunk)
                             offset += len(chunk)
+                            received += len(chunk)
                             progress.update(offset)
                         output.flush()
                         os.fsync(output.fileno())
@@ -480,7 +484,9 @@ class ResumableDownloader:
                     note(
                         debug,
                         f"流接收完成 stream={stream} bytes={offset} "
-                        f"attempt_s={time.monotonic() - started:.2f}",
+                        f"attempt_s={time.monotonic() - started:.2f} "
+                        f"received_bytes={received} "
+                        f"avg_mib_s={received / max(time.monotonic() - started, 0.001) / 1024**2:.3f} {route}",
                     )
                 if validate:
                     try:

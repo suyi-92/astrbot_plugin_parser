@@ -148,6 +148,9 @@ async def test_download_diagnostics_resume_backup_and_cache_without_secrets(
         "resume_bytes=1024",
         "下载进度",
         "流缓存命中",
+        f"received_bytes={len(body) - cut}",
+        "avg_mib_s=",
+        "route=direct",
     ):
         assert marker in output
     assert "SECRET" not in output and "SESSDATA" not in output
@@ -201,6 +204,7 @@ async def test_large_video_remains_video_and_upload_timing_waits_for_adapter(
     assert any("平台上传/发送 结束" in line for line in messages)
     assert any("component=Video" in line for line in messages)
     assert any("bytes=74448896" in line for line in messages)
+    assert any("source=adapter plugin_proxy_applied=off" in line for line in messages)
 
 
 async def test_message_entry_keeps_parse_and_send_in_same_trace(cfg, messages):

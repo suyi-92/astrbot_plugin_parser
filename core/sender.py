@@ -367,6 +367,10 @@ class MessageSender:
                 f"提交适配器 adapter={type(event).__name__} "
                 f"segments={self._collect_seg_meta(segs)}",
             )
+            note(
+                self.cfg.debug_media_info,
+                "平台上传路由 source=adapter plugin_proxy_applied=off（插件代理不接管适配器上传）",
+            )
             with stage(self.cfg.debug_media_info, "平台上传/发送"):
                 await event.send(event.chain_result(segs))
             return True

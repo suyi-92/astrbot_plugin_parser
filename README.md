@@ -5,7 +5,7 @@
 
 # astrbot_plugin_parser
 
-_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.4 ✨_
+_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.5 ✨_
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
@@ -64,7 +64,7 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.4 ✨_
 本仓库维护自 [Zhalslar/astrbot_plugin_parser](https://github.com/Zhalslar/astrbot_plugin_parser)，
 基线为 `5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`（v1.6.1，与上游相同，发布提交之后只有 README 修改）。
 保留插件内部名称 `astrbot_plugin_parser`、原作者署名与 [MIT 许可证](LICENSE)。
-本次版本为 **v1.6.4 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
+本次版本为 **v1.6.5 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
 
 目标环境：AstrBot **4.29.3**、Python **3.12**、Debian/Docker；需要 `ffmpeg` 和 `ffprobe`。
 完整的部署、回滚和验收说明见 [Fork 运维说明](docs/FORK_MAINTENANCE.md)。
@@ -77,7 +77,7 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.4 ✨_
    如部署版本提示目录已存在，先停止操作并查看报错，可使用运维说明中的手动代码替换步骤。
 4. WebUI 安装会处理 `requirements.txt`；手动安装时使用 AstrBot 的 Python 环境安装依赖。
    确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
-5. 查看版本是否为 v1.6.4、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
+5. 查看版本是否为 v1.6.5、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
 
 回滚时停用插件，恢复备份的**插件代码**，或检出上游 v1.6.1 发布提交
 `99eb31c76738fe9e865f56697d53146df153b1f2`。重新安装该版本依赖并启用。
@@ -119,6 +119,10 @@ v1.6.4 起，全局「代理地址」可直接填写完整的 `vless://` 节点�
 全局 `debug_media_info=false`：开启后以 DEBUG 记录交给适配器前的本地视频信息，并输出带同一请求编号的
 `解析诊断` 日志，涵盖信息获取、AI 摘要、缓存命中、CDN 进度/续传、校验、合并及平台上传/发送耗时。
 日志等级也需设为 DEBUG；不开启时不输出新增诊断日志。复测步骤见[耗时排查](docs/FORK_MAINTENANCE.md#下载慢与上传慢的区分)。
+v1.6.5 增加 B站 API、扫码和音视频请求的实际代理选择：`route=vless+xray` / `http-proxy` / `direct`。
+媒体响应的 `proxy_socket=confirmed` 表示实际连接端与传入的代理入口匹配，`unknown` 表示没有足够连接信息，不能据此判定直连。
+API 的 `worker_proxy=on/off` 来自独立进程内的实际库配置；完成下载另记 `avg_mib_s`，平台发送明确标记 `plugin_proxy_applied=off`。
+字段解释及安全示例见 [VLESS 路由诊断](docs/VLESS_PROXY.md#确认请求是否经过代理)。
 
 比较不同 VPS / HTTP 代理线路，使用[独立 B站 CDN 测速工具](docs/BILIBILI_SPEEDTEST.md)：
 无需安装 AstrBot，采用相同 API 配置、媒体请求头及官方候选地址，按节点限时采样，不写入视频缓存。

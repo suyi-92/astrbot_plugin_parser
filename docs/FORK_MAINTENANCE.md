@@ -1,4 +1,4 @@
-# v1.6.4 Fork 运维与验收
+# v1.6.5 Fork 运维与验收
 
 本维护版面向 AstrBot 4.29.3 / Python 3.12 / Debian Docker，继承原项目与 MIT 许可证。
 基线：`suyi-92/astrbot_plugin_parser@5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`，与读取时的上游 main 相同。
@@ -23,7 +23,7 @@
    AstrBot 4.29.3 的安装器按相同 metadata `name` 识别已有插件，备份并替换代码，保留配置和
    `plugin_data`；安装服务会记录 Fork 为仓库安装来源。无需先卸载，不要选择删除配置或数据。
    若实际部署提示「目录已存在」，先保留现状并检查版本/日志，或按下节仅替换代码。
-3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.4`、`repo` 指向本 Fork。
+3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.5`、`repo` 指向本 Fork。
 4. WebUI 会安装 `requirements.txt` 中的依赖；另需系统提供 FFmpeg/ffprobe。安装成功后再启用插件。
 5. WebUI → 插件配置 → 解析器 → B站解析器，可见 README 列出的 8 项新配置；全局另有 `debug_media_info` 和 [VLESS 内核配置](VLESS_PROXY.md)。旧配置缺少新增字段时使用默认值。
 
@@ -158,19 +158,24 @@ docker logs --since 2m -f astrbot 2>&1 | grep --line-buffered '解析诊断'
 | 日志阶段 | 可判断的耗时 |
 | --- | --- |
 | B站视频信息 / B站AI摘要 / B站播放地址 | API 请求和可能的本地凭证刷新；登录后还可能请求 AI 摘要 |
+| B站API代理路由 / B站API返回 / B站扫码响应 | 请求实际选择的 route、use_proxy 开关、配置类型；worker_proxy 表示独立 API 进程内实际启用状态，不是出口 IP 检测 |
 | 成片缓存锁等待 / 成片缓存校验 | 同资源并发等待、磁盘读取与 SHA-256 校验 |
-| CDN请求 / CDN响应 | 候选域名、请求次数、Range 起始偏移和收到响应头的等待时间 |
+| CDN请求 / CDN响应 | 候选域名、请求次数、Range 起始偏移、收到响应头的等待时间，以及 route / proxy_socket 代理连接证据 |
 | 下载进度 | `video`/`audio` 的已收 MiB、总 MiB、该日志间隔的 KiB/s；接收数据时约每 10 秒一条，完成另记一条 |
 | CDN重试 | 安全错误码、该次请求耗时及内存中已接收偏移；不表示残片一定能续传 |
+| 流接收完成 | received_bytes 是本次实收量；avg_mib_s 是本次实收量除以请求至接收写入完成耗时（含响应头等待），不把续传的旧字节计入速度 |
 | 完整性校验 / 缓存写入 | ffprobe、哈希与磁盘写入 |
 | FFmpeg合并（copy） | 合并容器的时间，不重新编码视频 |
 | 音频兼容检查/处理（视频copy） | 检查音频，必要时只转换音频 |
 | 平台上传/发送 | 等待 AstrBot 适配器返回的总时间，包含上传、平台处理和发送；不能据此细分到 QQ 内部阶段 |
+| 平台上传路由 | source=adapter / plugin_proxy_applied=off：插件代理未接管平台上传，不等于适配器或系统一定没有其他代理 |
 
 `elapsed_s` 是该阶段耗时。音视频并行、父子阶段重叠，不能把全部阶段时间简单相加。
 没有新数据时不会伪造进度；看最近的请求/响应记录，随后由读取超时和有限重试处理。
 “平台上传/发送结束”也不代表收件人的 QQ 客户端已下载完；聊天文件卡片上的速度是客户端接收速度。
 先依据日志定位再调整参数，不要把所有超时一律调大。诊断结束后关闭开关并恢复原日志等级。
+要确认 VLESS 是否用于下载，查看同一请求的 `route=vless+xray` 和 CDN 响应 `proxy_socket=confirmed`；详细解释见 [代理路由诊断](VLESS_PROXY.md#确认请求是否经过代理)。
+若缓存命中，没有发起 CDN 下载便不会出现 CDN 连接日志；用另一个未缓存的视频复测，保留原缓存和登录凭证。
 
 QQ 官方[富媒体文档](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html)
 当前列出视频软限制 30 MB、硬限制 200 MB，超过软限制转为文件类型上传。
@@ -205,6 +210,7 @@ v1.6.2 基线曾在 bilibili-api-python 17.4.1 与 17.4.2 下分别通过 106 �
 运行 VLESS 实际隧道测试时，设置 `XRAY_TEST_BINARY=/绝对路径/xray`；CI 下载固定版本并核对 SHA256 后设置该变量。
 未提供该变量时仅跳过需要真实内核的测试，不能将跳过视为验证成功。最新执行结果以对应提交的测试记录为准。
 v1.6.4 本地在 Python 3.12 / AstrBot 4.29.3 / bilibili-api-python 17.4.2 / Xray 26.10.21 下执行完整套件，结果 **193 passed**（真实隧道用例没有跳过）；Python 语法、Ruff F/E9、Shell 语法和差异空白检查通过。
+v1.6.5 在相同环境执行完整套件，结果 **217 passed**（真实 Xray 下载与连接证据用例没有跳过）；上述语法、静态及差异检查也通过。
 启用 `-W error::ResourceWarning` 后没有资源泄漏警告；仅 AstrBot 自身 `audioop` 的 Python 3.13 弃用提示。
 测试没有调用真实 B站、没有扫码真实账号、没有向 QQ 或 NapCat 发送消息。
 GitHub Actions 的远端执行状态需在仓库 Actions 中查看，本地通过不等于远端 CI 已运行。
