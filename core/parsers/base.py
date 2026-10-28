@@ -26,6 +26,7 @@ from ..data import (
 )
 from ..download import Downloader
 from ..exception import ParseException, RedirectException
+from ..vless_proxy import get_proxy
 
 T = TypeVar("T", bound="BaseParser")
 HandlerFunc = Callable[[T, Match[str]], Coroutine[Any, Any, ParseResult]]
@@ -82,7 +83,7 @@ class BaseParser:
             parser_cfg: ParserItem = getattr(
                 self.cfg.parser, self.__class__.platform.name
             )
-            return self.cfg.proxy if parser_cfg.use_proxy else None
+            return get_proxy(self.cfg) if parser_cfg.use_proxy else None
         except AttributeError:
             return None
 
@@ -116,9 +117,10 @@ class BaseParser:
     @property
     def session(self) -> ClientSession:
         """获取当前实例的 session，惰性创建"""
+        proxy = self.proxy  # Check a managed bridge even when reusing the session.
         if self._session is None or self._session.closed:
             self._session = ClientSession(
-                proxy=self.proxy, timeout=ClientTimeout(total=self.cfg.common_timeout)
+                proxy=proxy, timeout=ClientTimeout(total=self.cfg.common_timeout)
             )
         return self._session
 

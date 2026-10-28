@@ -26,12 +26,14 @@ from .core.parsers.bilibili.login import BilibiliLogin
 from .core.render import Renderer
 from .core.sender import MessageSender
 from .core.utils import extract_json_url
+from .core.vless_proxy import ProxyError, VlessProxy
 
 
 class ParserPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.cfg = PluginConfig(config, context=context)
+        self.proxy_manager = VlessProxy(self.cfg)
         # 渲染器
         self.renderer = Renderer(self.cfg)
         # 下载器
@@ -56,19 +58,27 @@ class ParserPlugin(Star):
         await asyncio.to_thread(Renderer.load_resources)
         # 注册解析器
         self._register_parser()
+        try:
+            await self.proxy_manager.start()
+        except ProxyError as exc:
+            # Direct parsers remain available; proxy-enabled ones fail clearly.
+            logger.warning(str(exc))
 
     async def terminate(self):
         """插件卸载时触发"""
-        await self.sender.close()
-        # 关所有解析器里的会话 (去重后的实例)
-        unique_parsers = set(self.parser_map.values())
-        for parser in unique_parsers:
-            await parser.close_session()
-        if self._offline_bili_login:
-            await self._offline_bili_login.close()
-        await self.downloader.close()
-        # 关缓存清理器
-        await self.cleaner.stop()
+        try:
+            await self.sender.close()
+            # 关所有解析器里的会话 (去重后的实例)
+            unique_parsers = set(self.parser_map.values())
+            for parser in unique_parsers:
+                await parser.close_session()
+            if self._offline_bili_login:
+                await self._offline_bili_login.close()
+            await self.downloader.close()
+            # 关缓存清理器
+            await self.cleaner.stop()
+        finally:
+            await self.proxy_manager.close()
 
     def _register_parser(self):
         """注册解析器（以 parser.enable 为唯一启用来源）"""

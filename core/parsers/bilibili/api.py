@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from ...exception import ParseException
+from ...vless_proxy import get_proxy
 
 
 class BilibiliAPI:
@@ -57,7 +58,7 @@ class BilibiliAPI:
                     "user_agent": options.api_user_agent,
                     "auto_buvid": options.auto_buvid,
                     "timeout": self.cfg.common_timeout,
-                    "proxy": (self.cfg.proxy or "") if options.use_proxy else "",
+                    "proxy": (get_proxy(self.cfg) or "") if options.use_proxy else "",
                 },
             }
             try:

@@ -1,4 +1,4 @@
-# v1.6.3 Fork 运维与验收
+# v1.6.4 Fork 运维与验收
 
 本维护版面向 AstrBot 4.29.3 / Python 3.12 / Debian Docker，继承原项目与 MIT 许可证。
 基线：`suyi-92/astrbot_plugin_parser@5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`，与读取时的上游 main 相同。
@@ -23,9 +23,9 @@
    AstrBot 4.29.3 的安装器按相同 metadata `name` 识别已有插件，备份并替换代码，保留配置和
    `plugin_data`；安装服务会记录 Fork 为仓库安装来源。无需先卸载，不要选择删除配置或数据。
    若实际部署提示「目录已存在」，先保留现状并检查版本/日志，或按下节仅替换代码。
-3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.3`、`repo` 指向本 Fork。
+3. 确认 `metadata.yaml` 中 `name: astrbot_plugin_parser`、`version: v1.6.4`、`repo` 指向本 Fork。
 4. WebUI 会安装 `requirements.txt` 中的依赖；另需系统提供 FFmpeg/ffprobe。安装成功后再启用插件。
-5. WebUI → 插件配置 → 解析器 → B站解析器，可见 README 列出的 8 项新配置；全局另有 `debug_media_info`。
+5. WebUI → 插件配置 → 解析器 → B站解析器，可见 README 列出的 8 项新配置；全局另有 `debug_media_info` 和 [VLESS 内核配置](VLESS_PROXY.md)。旧配置缺少新增字段时使用默认值。
 
 ### 手动替换代码（备用方式）
 
@@ -79,6 +79,9 @@ python -m pip install -r requirements.txt
 重新启用插件。原有 Cookie、模型、聊天和数据库路径都不变。
 
 ## 回滚到原版 v1.6.1
+
+如果已配置 `vless://`，先改为空（直连）或可用的外部 HTTP 代理入口并保存，再执行下面步骤；旧版不支持直接使用 VLESS。
+自动安装的 `plugin_data/astrbot_plugin_parser/proxy_bin/` 可保留，旧版不会加载它，不需要删除任何登录凭证。
 
 1. 停用插件，保存当前 Fork 的代码备份（移出 `data/plugins/`）。
 2. 首选恢复升级前的代码备份到原安装目录；或重新克隆上游并检出以下固定提交：
@@ -134,7 +137,7 @@ B站完整缓存由独立 TTL 管理；普通平台继续原来的 `clean_cron` 
 ## 下载慢与上传慢的区分
 
 v1.6.3 将现有 `debug_media_info` 开关扩展为阶段诊断，无需增加配置字段。
-先更新到 main 的 v1.6.3，在插件配置顶部将日志等级设为 DEBUG，打开底部
+先更新到 main 的最新 Fork，在插件配置顶部将日志等级设为 DEBUG，打开底部
 “发送前记录本地视频信息（DEBUG）”，保存。诊断行以 `[解析诊断 请求编号]` 开头；
 同一消息的解析、并行下载和发送任务共享编号，不记录 Cookie、完整媒体地址或异常详情。
 
@@ -198,11 +201,13 @@ OneBot v11 的视频组件保持文件 URI。生产环境 NapCat 需能访问相
 
 测试入口：`python -m pytest -q`；依赖：`requirements.txt`、`requirements-test.txt`，系统 `ffmpeg`/`ffprobe`。
 CI 工作流在 Python 3.12 下覆盖 bilibili-api-python 17.4.1 与 17.4.2，安装 AstrBot 4.29.3。
-本次本地执行结果：Python 3.12.14 / AstrBot 4.29.3 下，bilibili-api-python 17.4.1 与 17.4.2
-分别 **106 passed**；`compileall`、Ruff F/E9 和 `git diff --check` 通过。
+v1.6.2 基线曾在 bilibili-api-python 17.4.1 与 17.4.2 下分别通过 106 项测试；后续新增诊断、测速和 VLESS 用例。
+运行 VLESS 实际隧道测试时，设置 `XRAY_TEST_BINARY=/绝对路径/xray`；CI 下载固定版本并核对 SHA256 后设置该变量。
+未提供该变量时仅跳过需要真实内核的测试，不能将跳过视为验证成功。最新执行结果以对应提交的测试记录为准。
+v1.6.4 本地在 Python 3.12 / AstrBot 4.29.3 / bilibili-api-python 17.4.2 / Xray 26.10.21 下执行完整套件，结果 **193 passed**（真实隧道用例没有跳过）；Python 语法、Ruff F/E9、Shell 语法和差异空白检查通过。
 启用 `-W error::ResourceWarning` 后没有资源泄漏警告；仅 AstrBot 自身 `audioop` 的 Python 3.13 弃用提示。
 测试没有调用真实 B站、没有扫码真实账号、没有向 QQ 或 NapCat 发送消息。
-GitHub Actions 的远端执行状态需在 PR Checks 中查看，本地通过不等于远端 CI 已运行。
+GitHub Actions 的远端执行状态需在仓库 Actions 中查看，本地通过不等于远端 CI 已运行。
 
 | 验证领域 | 自动化方式 |
 | --- | --- |
@@ -218,6 +223,7 @@ GitHub Actions 的远端执行状态需在 PR Checks 中查看，本地通过不
 | AstrBot/QQ/OneBot | 真实 4.29.3 导入/初始化/注销、真实权限过滤器、Mock QQ 上传字节对比、OneBot URI |
 | 阶段诊断 | 并发请求编号隔离与子任务继承、取消传递、关闭时无输出、速度计算、567/206/缓存日志脱敏、71 MiB 文件仍为 Video 组件、等待适配器返回计时 |
 | 其他平台 | 原有 Cookie/QZone/JSON 测试，抖音/快手经过真实通用下载器的本地模拟回归 |
+| VLESS 代理 | 合成节点解析、SHA256 安装、失败/取消清理、真实 Xray 的本地 TLS/REALITY 隧道及 AstrBot 启停；不连接用户节点 |
 
 上线后仍应由管理员依次验证：匿名短视频 → 登录后相同视频实际画质 → 大文件断流 → QQ/NapCat 发送 → `/blogout` → 再次匿名解析。
 如需要排查版本问题，先记录 commit、Python/AstrBot/bilibili-api 版本、实际流信息、域名与错误码。
@@ -231,3 +237,4 @@ GitHub Actions 的远端执行状态需在 PR Checks 中查看，本地通过不
 - 真实扫码/刷新、完整 Docker 运维、真实 B站大视频和 QQ/NapCat 网络传输未由这些本地测试验证。
 - 合成媒体测试及包结构探测不能覆盖所有容器/编码组合；QQ 对 HEVC/AV1 等的接受程度及服务端压缩由平台决定，AVC 通常更便于排查。
 - API 子进程有额外资源开销；严格禁用子进程的宿主环境不适用。缓存锁以单进程单数据目录为边界。
+- VLESS 需要额外 Xray 进程；自动安装需容器能访问 GitHub。节点高级扩展、出口线路及真实 CDN 速度需在用户环境验证，QQ 上传不随插件代理切换。

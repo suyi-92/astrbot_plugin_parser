@@ -126,7 +126,19 @@
     },
     "proxy": {
         "description": "代理地址",
-        "hint": "如 http://127.0.0.1:7890, 留空则直连。配置代理地址后, 请在各个解析器中再配置是否使用代理",
+        "hint": "支持 http://代理地址:端口 或完整 vless:// 节点分享链接，留空直连。VLESS 需提供 Xray 内核或开启下方自动下载；在各解析器打开“使用代理”，保存后重载插件。节点链接含凭证，请勿公开截图。",
+        "type": "string",
+        "default": ""
+    },
+    "proxy_xray_auto_download": {
+        "description": "允许自动下载 Xray 内核",
+        "hint": "仅在使用 VLESS 且找不到已有 Xray 时生效。下载固定版本的官方内核并校验 SHA256，保存在插件持久化数据目录；支持 Linux amd64/arm64。首次安装需要容器能访问 GitHub，最多等待 180 秒。",
+        "type": "bool",
+        "default": false
+    },
+    "proxy_xray_path": {
+        "description": "已有 Xray 内核路径（可选）",
+        "hint": "填写 AstrBot 容器内可执行文件的绝对路径，例如 /usr/local/bin/xray；留空自动查找 PATH 和插件已下载的内核。不要填目录、节点链接或带参数的命令。",
         "type": "string",
         "default": ""
     },

@@ -5,7 +5,7 @@
 
 # astrbot_plugin_parser
 
-_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.3 ✨_
+_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.4 ✨_
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
@@ -64,7 +64,7 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.3 ✨_
 本仓库维护自 [Zhalslar/astrbot_plugin_parser](https://github.com/Zhalslar/astrbot_plugin_parser)，
 基线为 `5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`（v1.6.1，与上游相同，发布提交之后只有 README 修改）。
 保留插件内部名称 `astrbot_plugin_parser`、原作者署名与 [MIT 许可证](LICENSE)。
-本次版本为 **v1.6.3 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
+本次版本为 **v1.6.4 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
 
 目标环境：AstrBot **4.29.3**、Python **3.12**、Debian/Docker；需要 `ffmpeg` 和 `ffprobe`。
 完整的部署、回滚和验收说明见 [Fork 运维说明](docs/FORK_MAINTENANCE.md)。
@@ -77,11 +77,28 @@ _✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.3 ✨_
    如部署版本提示目录已存在，先停止操作并查看报错，可使用运维说明中的手动代码替换步骤。
 4. WebUI 安装会处理 `requirements.txt`；手动安装时使用 AstrBot 的 Python 环境安装依赖。
    确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
-5. 查看版本是否为 v1.6.3、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
+5. 查看版本是否为 v1.6.4、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
 
 回滚时停用插件，恢复备份的**插件代码**，或检出上游 v1.6.1 发布提交
 `99eb31c76738fe9e865f56697d53146df153b1f2`。重新安装该版本依赖并启用。
 不要删除 Cookie、插件持久化数据、聊天记录、AstrBot 数据库或模型配置；回滚不需要 `/blogout`。
+如果配置了 VLESS，回滚到不支持它的旧版前，先清空代理地址或改为外部 HTTP 代理入口。
+
+## VLESS 节点代理
+
+v1.6.4 起，全局「代理地址」可直接填写完整的 `vless://` 节点分享链接。
+插件通过独立 Xray 进程转换为容器内的 HTTP 入口，不需要另外映射代理端口或修改系统代理。
+
+| WebUI 配置 | 默认值 | 使用 VLESS 时 |
+| --- | --- | --- |
+| 代理地址 `proxy` | 空（直连） | 粘贴完整 `vless://` 节点链接，不是订阅地址 |
+| 允许自动下载 Xray 内核 `proxy_xray_auto_download` | 关闭 | 没有已有内核时开启；首次需访问 GitHub |
+| 已有 Xray 内核路径 `proxy_xray_path` | 空 | 自动下载时留空；也可填写容器内已有可执行文件路径 |
+| B站解析器 → 使用代理 `use_proxy` | 关闭 | 开启；其他解析器按需独立开启 |
+
+保存后**重载插件**。支持常见 TLS / REALITY 分享链接；内核安装、支持范围、错误处理和回滚详见
+[VLESS 配置说明](docs/VLESS_PROXY.md)。原有 HTTP 代理配置继续有效。
+节点故障时，已启用代理的请求会报错，不自动直连。插件代理不接管 QQ 官方适配器的上传线路，也不保证 CDN 一定提速。
 
 ## ⚙️ B站配置与工作方式
 

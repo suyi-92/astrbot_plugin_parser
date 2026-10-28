@@ -264,6 +264,8 @@ class PluginConfig(ConfigNode):
     common_timeout: int
 
     proxy: str | None
+    proxy_xray_path: str
+    proxy_xray_auto_download: bool
 
     clean_cron: str
 
@@ -273,6 +275,8 @@ class PluginConfig(ConfigNode):
 
     def __init__(self, config: AstrBotConfig, context: Context):
         config.setdefault("debug_media_info", False)
+        config.setdefault("proxy_xray_path", "")
+        config.setdefault("proxy_xray_auto_download", False)
         super().__init__(config)
         self.context = context
         self.admins_id = self.context.get_config().get("admins_id", [])

@@ -11,6 +11,7 @@ from bilibili_api import Credential
 from aiohttp import ClientSession, ClientTimeout
 
 from ...exception import ParseException
+from ...vless_proxy import get_proxy
 
 from astrbot.api import logger
 
@@ -222,7 +223,7 @@ class BilibiliLogin:
                     url,
                     params=params,
                     allow_redirects=False,
-                    proxy=self.cfg.proxy if options.use_proxy else None,
+                    proxy=get_proxy(self.cfg) if options.use_proxy else None,
                 ) as response:
                     if response.status != 200:
                         raise ParseException(
