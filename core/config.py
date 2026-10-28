@@ -274,6 +274,7 @@ class PluginConfig(ConfigNode):
     _plugin_name = "astrbot_plugin_parser"
 
     def __init__(self, config: AstrBotConfig, context: Context):
+        config.setdefault("source_max_minute", 0)
         config.setdefault("debug_media_info", False)
         config.setdefault("proxy_xray_path", "")
         config.setdefault("proxy_xray_auto_download", False)
@@ -287,7 +288,11 @@ class PluginConfig(ConfigNode):
 
         # ---------- 派生字段 ----------
         self.proxy = self.proxy or None
-        self.max_duration = self.source_max_minute * 60
+        # All parser duration comparisons share this in-memory bound. Infinity
+        # disables only the media-length gate; the saved setting stays an int.
+        self.max_duration = (
+            self.source_max_minute * 60 if self.source_max_minute > 0 else float("inf")
+        )
         self.max_size = self.source_max_size * 1024 * 1024
 
         tz = context.get_config().get("timezone")
