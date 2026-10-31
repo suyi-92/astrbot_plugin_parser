@@ -162,7 +162,7 @@ class BilibiliParser(BaseParser):
             page_num (int): 页码
         """
 
-        from .video import AIConclusion, VideoInfo
+        from .video import VideoInfo
 
         video = await self._get_video(bvid=bvid, avid=avid)
         # 转换为 msgspec struct
@@ -175,17 +175,8 @@ class BilibiliParser(BaseParser):
         # 处理分 p
         page_info = video_info.extract_info_with_page(page_num)
 
-        # 获取 AI 总结（默认提示）
-        ai_summary = ""
-        if self.login._credential:
-            try:
-                with stage(self.cfg.debug_media_info, "B站AI摘要"):
-                    cid = await video.get_cid(page_info.index)
-                    ai_conclusion = await video.get_ai_conclusion(cid)
-                    ai_conclusion = convert(ai_conclusion, AIConclusion)
-                    ai_summary = ai_conclusion.summary
-            except Exception:
-                ai_summary = "哔哩哔哩 cookie 未配置或失效, 无法使用 AI 总结"
+        # AI 摘要不是视频下载所必需；默认关闭，避免每条视频额外请求 CID 和 AI 总结接口。
+        ai_summary = await self._get_ai_summary(video, page_info)
 
         url = f"https://bilibili.com/{video_info.bvid}"
         url += f"?p={page_info.index + 1}" if page_info.index > 0 else ""
@@ -209,6 +200,21 @@ class BilibiliParser(BaseParser):
             contents=[video_content],
             extra={"info": ai_summary},
         )
+
+    async def _get_ai_summary(self, video, page_info) -> str:
+        """Fetch the optional Bilibili AI summary only when explicitly enabled."""
+        if not self.mycfg.fetch_ai_summary or not self.login._credential:
+            return ""
+        from .video import AIConclusion
+
+        try:
+            with stage(self.cfg.debug_media_info, "B站AI摘要"):
+                cid = await video.get_cid(page_info.index)
+                raw = await video.get_ai_conclusion(cid)
+                conclusion = convert(raw, AIConclusion)
+                return conclusion.summary
+        except Exception:
+            return "哔哩哔哩 cookie 未配置或失效, 无法使用 AI 总结"
 
     async def parse_dynamic(self, dynamic_id: int):
         """解析动态信息

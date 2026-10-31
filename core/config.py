@@ -159,6 +159,7 @@ BILIBILI_DEFAULTS = {
     "task_timeout": 900,
     "partial_expire_hours": 24,
     "cache_expire_hours": 24,
+    "fetch_ai_summary": False,
 }
 
 
@@ -185,6 +186,7 @@ class ParserItem(ConfigNode):
     task_timeout: int | None
     partial_expire_hours: int | None
     cache_expire_hours: int | None
+    fetch_ai_summary: bool | None
     block_pcdn: bool | None
     metube_url: str | None
     wait_timeout: int | None

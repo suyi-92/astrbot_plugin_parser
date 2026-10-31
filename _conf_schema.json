@@ -243,6 +243,12 @@
                         "default": false,
                         "hint": "关闭以采用已验证的兼容配置；登录不是必须条件。"
                     },
+                    "fetch_ai_summary": {
+                        "description": "获取B站AI总结",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "开启后每条视频会额外请求 CID 和 AI 总结接口；关闭可减少 API 请求和解析等待，不影响视频信息、播放地址、下载或画质。"
+                    },
                     "connect_timeout": {
                         "description": "B站 CDN 连接超时（秒）",
                         "type": "int",
