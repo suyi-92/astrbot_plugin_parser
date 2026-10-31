@@ -515,8 +515,14 @@ class ResumableDownloader:
                     f"attempt_s={time.monotonic() - started:.2f} saved_bytes={offset}",
                 )
                 failures[url_hash] = failures.get(url_hash, 0) + 1
+                # Truncated payloads indicate this CDN connection is unhealthy;
+                # fail over immediately rather than spending another retry on it.
                 rotate = isinstance(exc, Retryable) and exc.rotate
-                if rotate or failures[url_hash] >= 2:
+                if (
+                    rotate
+                    or isinstance(exc, aiohttp.ClientPayloadError)
+                    or failures[url_hash] >= 2
+                ):
                     index += 1
                 # Refresh only expired/auth candidates, once, within the original budget.
                 if (
