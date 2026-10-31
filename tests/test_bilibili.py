@@ -163,6 +163,25 @@ def test_default_old_config_migration_and_schema():
         assert items[key]["default"] == template[key] == value
 
 
+async def test_ai_summary_disabled_skips_extra_api_calls(cfg):
+    parser = BilibiliParser(cfg, SimpleNamespace())
+    parser.login._credential = object()
+    parser.mycfg.fetch_ai_summary = False
+    video = SimpleNamespace(
+        get_cid=AsyncMock(side_effect=AssertionError("CID API must not be called")),
+        get_ai_conclusion=AsyncMock(
+            side_effect=AssertionError("AI summary API must not be called")
+        ),
+    )
+    try:
+        summary = await parser._get_ai_summary(video, SimpleNamespace(index=0))
+        assert summary == ""
+        video.get_cid.assert_not_awaited()
+        video.get_ai_conclusion.assert_not_awaited()
+    finally:
+        await parser.close_session()
+
+
 def test_actual_quality_ceiling_and_codec_identity():
     data = play_data(32)
     data["dash"]["video"] += play_data(80)["dash"]["video"]
