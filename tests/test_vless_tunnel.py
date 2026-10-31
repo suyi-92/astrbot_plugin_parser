@@ -1,17 +1,19 @@
-"""Real local Xray tunnels with synthetic keys, no remote node/API required."""
+"""Plugin bridge contract tests, using a local Python process and HTTPS origin.
+
+No Xray download, external proxy or Bilibili request is needed. Actual VLESS
+transport interop remains in manual_vless_tunnel.py for explicit maintainer runs.
+"""
 
 import asyncio
-import base64
 import datetime
 import ipaddress
 import json
-import os
-import socket
 import ssl
-from contextlib import asynccontextmanager
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 import aiohttp
 import pytest
@@ -19,7 +21,7 @@ from aiohttp import web
 from aiohttp.resolver import DefaultResolver
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, x25519
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from parser_under_test.core import vless_proxy as mod
@@ -29,12 +31,75 @@ from test_vless_proxy import NODE_ID, node
 
 
 @pytest.fixture
-def xray():
-    path = os.environ.get("XRAY_TEST_BINARY")
-    if not path:
-        pytest.skip("Set XRAY_TEST_BINARY to test the actual local VLESS tunnel")
-    assert Path(path).is_file(), "XRAY_TEST_BINARY is not a file"
-    return path
+def bridge_core(tmp_path):
+    """A real child process that implements only the local HTTP core contract.
+
+    This is not a VLESS implementation. Restrict destinations to loopback and
+    reject non-CONNECT methods so a failing test cannot contact an external node.
+    """
+    path = tmp_path / "local-http-core"
+    script = r'''
+        import asyncio
+        import base64
+        import ipaddress
+        import json
+        import sys
+
+        config = json.load(sys.stdin)
+        inbound = config["inbounds"][0]
+        account = inbound["settings"]["accounts"][0]
+        auth = b"Basic " + base64.b64encode(
+            (account["user"] + ":" + account["pass"]).encode()
+        )
+
+        async def relay(reader, writer):
+            try:
+                while data := await reader.read(65536):
+                    writer.write(data)
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async def client(reader, writer):
+            remote = None
+            try:
+                raw = await reader.readuntil(b"\r\n\r\n")
+                lines = raw.split(b"\r\n")
+                headers = dict(line.split(b":", 1) for line in lines[1:] if b":" in line)
+                if headers.get(b"Proxy-Authorization", b"").strip() != auth:
+                    writer.write(b'HTTP/1.1 407 Proxy Authentication Required\r\n'
+                                 b'Proxy-Authenticate: Basic realm="local-test"\r\n'
+                                 b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+                    await writer.drain()
+                    return
+                method, authority, _ = lines[0].split(b" ")
+                assert method == b"CONNECT"
+                host, port = authority.decode().rsplit(":", 1)
+                assert ipaddress.ip_address(host).is_loopback
+                remote_reader, remote = await asyncio.open_connection(host, int(port))
+                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                await writer.drain()
+                await asyncio.gather(relay(reader, remote), relay(remote_reader, writer))
+            except (OSError, ValueError, AssertionError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                if remote:
+                    remote.close()
+                    await remote.wait_closed()
+                writer.close()
+                await writer.wait_closed()
+
+        async def main():
+            server = await asyncio.start_server(client, "127.0.0.1", inbound["port"])
+            async with server:
+                await server.serve_forever()
+
+        asyncio.run(main())
+    '''
+    path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(script))
+    path.chmod(0o700)
+    return str(path)
 
 
 def tls_files(tmp_path):
@@ -74,45 +139,6 @@ def tls_files(tmp_path):
     return cert_path, key_path
 
 
-@asynccontextmanager
-async def core_process(binary, config):
-    process = await asyncio.create_subprocess_exec(
-        binary,
-        "run",
-        "-config",
-        "stdin:",
-        "-format",
-        "json",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
-        process.stdin.write(json.dumps(config).encode())
-        await process.stdin.drain()
-        process.stdin.close()
-        port = config["inbounds"][0]["port"]
-        async with asyncio.timeout(5):
-            while True:
-                assert process.returncode is None, "local Xray server failed"
-                try:
-                    _, writer = await asyncio.open_connection("127.0.0.1", port)
-                    writer.close()
-                    await writer.wait_closed()
-                    break
-                except OSError:
-                    await asyncio.sleep(0.02)
-        yield process
-    finally:
-        if process.returncode is None:
-            process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), 3)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-
-
 @pytest.mark.parametrize(
     "transport,security",
     [
@@ -124,32 +150,12 @@ async def core_process(binary, config):
         ("tcp", "reality"),
     ],
 )
-async def test_actual_vless_tunnel_https_auth_and_shutdown(
-    xray,
-    cfg,
-    tmp_path,
-    monkeypatch,
-    transport,
-    security,
+async def test_bridge_https_auth_redaction_and_shutdown(
+    bridge_core, cfg, tmp_path, monkeypatch, transport, security
 ):
     cert, key = tls_files(tmp_path)
-    # Xray defaults to bundled CA roots, not SSL_CERT_FILE. Add this test CA to
-    # the client's trust pool without disabling certificate verification.
-    original_config = mod.bridge_config
-
-    def trust_test_ca(*args):
-        config = original_config(*args)
-        stream_settings = config["outbounds"][0]["streamSettings"]
-        if stream_settings["security"] == "tls":
-            stream_settings["tlsSettings"]["certificates"] = [
-                {"certificateFile": str(cert), "usage": "verify"}
-            ]
-        return config
-
-    monkeypatch.setattr(mod, "bridge_config", trust_test_ca)
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_tls.minimum_version = ssl.TLSVersion.TLSv1_3
-    server_tls.set_alpn_protocols(["h2", "http/1.1"])
     server_tls.load_cert_chain(cert, key)
     client_tls = ssl.create_default_context(cafile=str(cert))
     body = bytes(range(256)) * 8192
@@ -167,135 +173,66 @@ async def test_actual_vless_tunnel_https_auth_and_shutdown(
     site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_tls)
     await site.start()
     target_port = site._server.sockets[0].getsockname()[1]
-    with socket.socket() as reserve:
-        reserve.bind(("127.0.0.1", 0))
-        node_port = reserve.getsockname()[1]
     params = {"type": transport, "security": security, "sni": "localhost"}
-    settings_key = {
-        "ws": "wsSettings",
-        "grpc": "grpcSettings",
-        "xhttp": "xhttpSettings",
-        "httpupgrade": "httpupgradeSettings",
-    }.get(transport)
-    stream = {"network": transport, "security": security}
-    if settings_key:
-        stream[settings_key] = (
-            {"serviceName": "test"} if transport == "grpc" else {"path": "/test"}
-        )
-        params["serviceName" if transport == "grpc" else "path"] = (
-            "test" if transport == "grpc" else "/test"
-        )
-    if security == "tls":
-        stream["tlsSettings"] = {
-            "certificates": [{"certificateFile": str(cert), "keyFile": str(key)}]
-        }
-    else:
-        reality_key = x25519.X25519PrivateKey.generate()
-
-        def encode(raw):
-            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-        private = encode(reality_key.private_bytes_raw())
-        public = encode(reality_key.public_key().public_bytes_raw())
-        stream["realitySettings"] = {
-            "dest": f"127.0.0.1:{target_port}",
-            "serverNames": ["localhost"],
-            "privateKey": private,
-            "shortIds": ["0123456789abcdef"],
-        }
-        params.update(pbk=public, sid="0123456789abcdef", flow="xtls-rprx-vision")
-    server = {
-        "log": {"loglevel": "none"},
-        "inbounds": [
-            {
-                "listen": "127.0.0.1",
-                "port": node_port,
-                "protocol": "vless",
-                "settings": {
-                    "decryption": "none",
-                    "clients": [{"id": NODE_ID, "flow": params.get("flow", "")}],
-                },
-                "streamSettings": stream,
-            }
-        ],
-        # Xray 26.10 blocks private destinations by default on server inbounds.
-        # This synthetic server permits only this test's loopback HTTPS port.
-        "outbounds": [
-            {
-                "protocol": "freedom",
-                "settings": {
-                    "finalRules": [
-                        {
-                            "action": "allow",
-                            "network": "tcp",
-                            "ip": ["127.0.0.1/32"],
-                            "port": str(target_port),
-                        },
-                    ]
-                },
-            }
-        ],
-    }
-    cfg.proxy = f"vless://{NODE_ID}@127.0.0.1:{node_port}?{urlencode(params)}"
+    if security == "reality":
+        params.update(pbk="A" * 43, sid="0123456789abcdef", flow="xtls-rprx-vision")
+    cfg.proxy = node(**params)
     original = cfg.proxy
+    # The config translator remains real; the local test peer only replaces
+    # the third-party executable at the subprocess boundary.
+    outbound = mod.parse_vless(cfg.proxy)
+    assert outbound["streamSettings"]["network"] == transport
+    assert outbound["streamSettings"]["security"] == security
     cfg.parser.bilibili.use_proxy = True
-    cfg.proxy_xray_path = xray
+    cfg.proxy_xray_path = bridge_core
     cfg.debug_media_info = True
     logs = []
     monkeypatch.setattr(diag.logger, "debug", logs.append)
-    # Synthetic loopback media and a local test CA only. Production continues
-    # checking public CDN addresses and validating real TLS certificates.
     monkeypatch.setattr(resumable, "validate_media_url", lambda url: None)
     monkeypatch.setattr(resumable.PublicResolver, "resolve", DefaultResolver.resolve)
     manager = mod.VlessProxy(cfg)
     downloader = resumable.ResumableDownloader(cfg)
     try:
-        async with core_process(xray, server):
-            await manager.start()
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15),
-                connector=aiohttp.TCPConnector(ssl=client_tls),
-                trust_env=False,
-            ) as session:
-                downloader.client = session
-                path = await downloader.download(
-                    [f"https://127.0.0.1:{target_port}/video?sign=SYNTHETIC-SECRET"],
-                    downloader.directory / "fixture.mp4",
-                    resource="fixture:video",
-                    proxy=manager.endpoint,
-                )
-                assert path.read_bytes() == body
-                response_log = next(line for line in logs if "CDN响应" in line)
-                assert "route=vless+xray" in response_log
-                assert "socket_peer=loopback proxy_socket=confirmed" in response_log
-                for secret in (
-                    NODE_ID,
-                    "SYNTHETIC-SECRET",
-                    "vless://",
-                    "http://parser:",
-                ):
-                    assert secret not in "\n".join(logs)
-                endpoint = urlsplit(manager.endpoint)
-                async with session.get(
-                    "http://parser-probe.invalid/",
-                    proxy=f"http://127.0.0.1:{endpoint.port}",
-                ) as response:
-                    assert response.status == 407
-            assert calls == ["/video"]
-            assert cfg.proxy == original
-            process = manager.process
-            await manager.close()
-            assert process.returncode is not None
-            with pytest.raises(mod.ProxyError):
-                mod.get_proxy(cfg)
+        await manager.start()
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15),
+            connector=aiohttp.TCPConnector(ssl=client_tls),
+            trust_env=False,
+        ) as session:
+            downloader.client = session
+            path = await downloader.download(
+                [f"https://127.0.0.1:{target_port}/video?sign=SYNTHETIC-SECRET"],
+                downloader.directory / "fixture.mp4",
+                resource="fixture:video",
+                proxy=manager.endpoint,
+            )
+            assert path.read_bytes() == body
+            response_log = next(line for line in logs if "CDN响应" in line)
+            assert "route=vless+xray" in response_log
+            assert "socket_peer=loopback proxy_socket=confirmed" in response_log
+            for secret in (NODE_ID, "SYNTHETIC-SECRET", "vless://", "http://parser:"):
+                assert secret not in "\n".join(logs)
+            endpoint = urlsplit(manager.endpoint)
+            async with session.get(
+                "http://parser-probe.invalid/",
+                proxy=f"http://127.0.0.1:{endpoint.port}",
+            ) as response:
+                assert response.status == 407
+        assert calls == ["/video"]
+        assert cfg.proxy == original
+        process = manager.process
+        await manager.close()
+        assert process.returncode is not None
+        with pytest.raises(mod.ProxyError):
+            mod.get_proxy(cfg)
     finally:
         await downloader.close()
         await manager.close()
         await runner.cleanup()
 
 
-async def test_node_change_and_core_exit_fail_closed(xray, cfg):
-    cfg.proxy, cfg.proxy_xray_path = node(), xray
+async def test_node_change_and_core_exit_fail_closed(bridge_core, cfg):
+    cfg.proxy, cfg.proxy_xray_path = node(), bridge_core
     cfg.parser.bilibili.use_proxy = True
     manager = mod.VlessProxy(cfg)
     try:
@@ -312,8 +249,8 @@ async def test_node_change_and_core_exit_fail_closed(xray, cfg):
         await manager.close()
 
 
-async def test_bilibili_worker_receives_http_endpoint_not_vless(xray, cfg):
-    cfg.proxy, cfg.proxy_xray_path = node(), xray
+async def test_bilibili_worker_receives_http_endpoint_not_vless(bridge_core, cfg):
+    cfg.proxy, cfg.proxy_xray_path = node(), bridge_core
     cfg.parser.bilibili.use_proxy = True
     manager = mod.VlessProxy(cfg)
     await manager.start()
@@ -343,7 +280,7 @@ async def test_bilibili_worker_receives_http_endpoint_not_vless(xray, cfg):
 
 @pytest.mark.parametrize("missing_core", [False, True])
 async def test_astrbot_vless_lifecycle_and_direct_parser_isolation(
-    xray, tmp_path, monkeypatch, missing_core
+    bridge_core, tmp_path, monkeypatch, missing_core
 ):
     from astrbot.core.config.astrbot_config import AstrBotConfig
     from parser_under_test.core import config as config_module
@@ -357,7 +294,7 @@ async def test_astrbot_vless_lifecycle_and_direct_parser_isolation(
         schema=json.loads((root / "_conf_schema.json").read_text()),
     )
     raw["proxy"] = node()
-    raw["proxy_xray_path"] = str(tmp_path / "missing-core") if missing_core else xray
+    raw["proxy_xray_path"] = str(tmp_path / "missing-core") if missing_core else bridge_core
     raw["parsers_template"] = [
         {"__template_key": name, "enable": True, "use_proxy": proxy, "cookies": ""}
         for name, proxy in [("bilibili", True), ("douyin", False)]
@@ -384,7 +321,7 @@ async def test_astrbot_vless_lifecycle_and_direct_parser_isolation(
             process = plugin.proxy_manager.process
             assert bili.proxy == plugin.proxy_manager.endpoint
             # Starts the real isolated Python worker; this method does not dial
-            # the node or Bilibili. Remote routing is covered by tunnel tests.
+            # the node or Bilibili. Actual VLESS interop is a maintainer test.
             assert (await bili.api.call("settings"))["client"] == "aiohttp"
     finally:
         await plugin.terminate()

@@ -62,7 +62,7 @@ BLOCKED_PCDN_DOMAINS = (
     "nexusedgeio.com",
     "ahdohpiechei.com",
 )
-LOW_PRIORITY_DOMAINS = ("upos-sz-mirrorcosov.bilivideo.com",)
+HIGH_PRIORITY_DOMAINS = ("upos-sz-mirrorcosov.bilivideo.com",)
 
 
 class ProbeError(Exception):
@@ -185,7 +185,7 @@ def select_video(data, quality=116, block_pcdn=False):
         ):
             continue
         urls.append(url)
-    urls.sort(key=lambda u: (urlsplit(u).hostname or "") in LOW_PRIORITY_DOMAINS)
+    urls.sort(key=lambda u: (urlsplit(u).hostname or "") not in HIGH_PRIORITY_DOMAINS)
     if not urls:
         raise ProbeError("no-safe-official-candidate")
     return {

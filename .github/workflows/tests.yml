@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         bilibili: ["17.4.1", "17.4.2"]
     steps:
@@ -26,16 +27,8 @@ jobs:
           ffmpeg -version
           ffprobe -version
       - run: python -m pip install -r requirements.txt -r requirements-test.txt "bilibili-api-python==${{ matrix.bilibili }}"
-      - name: Verified Xray for local VLESS tunnel tests
-        run: |
-          mkdir -p "$RUNNER_TEMP/parser-xray"
-          cd "$RUNNER_TEMP/parser-xray"
-          curl -fLsS --connect-timeout 15 --max-time 180 -o xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.10.21/Xray-linux-64.zip
-          echo '0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978  xray.zip' | sha256sum -c -
-          unzip -q xray.zip xray
-          chmod 700 xray
-          echo "XRAY_TEST_BINARY=$PWD/xray" >> "$GITHUB_ENV"
-      - run: python -m pytest -q
+      - run: python -m pytest -q -W error::ResourceWarning
       - run: python -m compileall -q main.py core tests tools
-      - run: bash -n tools/bili_speedtest.sh
-      - run: ruff check --select F,E9 main.py core/diagnostics.py core/resumable.py core/download.py core/utils.py core/config.py core/clean.py core/sender.py core/vless_proxy.py core/parsers/base.py core/parsers/bilibili tests tools
+      - name: Bash syntax
+        run: git ls-files -z '*.sh' | xargs -0 -r -n 1 bash -n
+      - run: ruff check --select F,E9 main.py core tests tools
