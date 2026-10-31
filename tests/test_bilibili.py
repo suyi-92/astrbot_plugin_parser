@@ -182,6 +182,23 @@ async def test_ai_summary_disabled_skips_extra_api_calls(cfg):
         await parser.close_session()
 
 
+def test_measured_mirrorcosov_candidate_is_preferred():
+    from core.parsers.bilibili.streams import candidates
+
+    raw = {
+        "base_url": "https://upos-hz-mirrorakam.akamaized.net/video.m4s",
+        "backup_url": [
+            "https://upos-sz-mirrorcosov.bilivideo.com/video.m4s",
+            "https://upos-sz-mirrorcos.bilivideo.com/video.m4s",
+        ],
+    }
+    selected = candidates(raw, block_pcdn=False)
+    assert selected[0].startswith(
+        "https://upos-sz-mirrorcosov.bilivideo.com/"
+    )
+    assert len(selected) == 3
+
+
 def test_actual_quality_ceiling_and_codec_identity():
     data = play_data(32)
     data["dash"]["video"] += play_data(80)["dash"]["video"]
