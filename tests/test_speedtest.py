@@ -72,8 +72,8 @@ def test_filter_pcdn_and_unsafe_candidates():
         "https://a.akamaized.net/b?sign=BACKUP",
     ]
     assert speed.select_video(data, block_pcdn=True)[1] == [
-        video["backup_url"][2],
         video["base_url"],
+        video["backup_url"][2],
     ]
 
 
