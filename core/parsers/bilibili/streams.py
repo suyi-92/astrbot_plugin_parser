@@ -16,7 +16,8 @@ BLOCKED_PCDN_DOMAINS = (
     "nexusedgeio.com",
     "ahdohpiechei.com",
 )
-LOW_PRIORITY_DOMAINS = ("upos-sz-mirrorcosov.bilivideo.com",)
+PREFERRED_DOMAINS = ("upos-sz-mirrorcosov.bilivideo.com",)
+LOW_PRIORITY_DOMAINS = ()
 
 
 def _is_pcdn_url(url):
@@ -39,7 +40,12 @@ def candidates(raw, block_pcdn):
             continue
         if not block_pcdn or not _is_pcdn_url(url):
             result.append(url)
-    result.sort(key=lambda u: (urlsplit(u).hostname or "") in LOW_PRIORITY_DOMAINS)
+    result.sort(
+        key=lambda u: (
+            (urlsplit(u).hostname or "") not in PREFERRED_DOMAINS,
+            (urlsplit(u).hostname or "") in LOW_PRIORITY_DOMAINS,
+        )
+    )
     if not result:
         raise DownloadException("B站没有可用的安全 CDN 地址（请检查 block_pcdn 设置）")
     return result
