@@ -182,6 +182,47 @@ async def test_ai_summary_disabled_skips_extra_api_calls(cfg):
         await parser.close_session()
 
 
+async def test_recent_cache_preflight_skips_playurl(cfg):
+    parser = BilibiliParser(cfg, SimpleNamespace())
+    parser.login._credential = Credential(
+        sessdata="synthetic-session", dedeuserid="12345"
+    )
+    bvid, page = "BV11EnQ6CER8", 1
+    resource = f"{bvid}:{page}:synthetic-stream"
+    cached = parser.resumable.directory / "cached-q80-synthetic.mp4"
+    part = cached.with_name(cached.name + ".part")
+    part.write_bytes(b"verified synthetic media")
+    await parser.resumable.publish(part, cached, resource)
+    await parser._write_video_cache_index(bvid, page, cached, resource)
+    try:
+        assert await parser._find_cached_video(bvid, page) == cached
+    finally:
+        await parser.close_session()
+
+
+async def test_cache_preflight_isolated_by_bilibili_account(cfg):
+    parser = BilibiliParser(cfg, SimpleNamespace())
+    bvid, page = "BV11EnQ6CER8", 1
+    parser.login._credential = Credential(
+        sessdata="synthetic-session-a", dedeuserid="111"
+    )
+    index_a = parser._cache_index_path(bvid, page)
+    resource = f"{bvid}:{page}:synthetic-stream"
+    cached = parser.resumable.directory / "cached-q80-account-a.mp4"
+    part = cached.with_name(cached.name + ".part")
+    part.write_bytes(b"account-scoped media")
+    await parser.resumable.publish(part, cached, resource)
+    await parser._write_video_cache_index(bvid, page, cached, resource)
+    parser.login._credential = Credential(
+        sessdata="synthetic-session-b", dedeuserid="222"
+    )
+    try:
+        assert parser._cache_index_path(bvid, page) != index_a
+        assert await parser._find_cached_video(bvid, page) is None
+    finally:
+        await parser.close_session()
+
+
 def test_actual_quality_ceiling_and_codec_identity():
     data = play_data(32)
     data["dash"]["video"] += play_data(80)["dash"]["video"]
