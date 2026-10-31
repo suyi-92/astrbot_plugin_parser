@@ -16,7 +16,7 @@ from parser_under_test.core.constants import COMMON_HEADER
 from parser_under_test.core.resumable import MEDIA_DOMAINS
 from parser_under_test.core.parsers.bilibili.streams import (
     BLOCKED_PCDN_DOMAINS,
-    LOW_PRIORITY_DOMAINS,
+    HIGH_PRIORITY_DOMAINS,
     select_streams,
 )
 from test_bilibili import play_data
@@ -32,7 +32,7 @@ def test_standalone_headers_and_candidates_match_plugin():
     assert speed.MEDIA_HEADERS["User-Agent"] == COMMON_HEADER["User-Agent"]
     assert speed.MEDIA_DOMAINS == MEDIA_DOMAINS
     assert speed.BLOCKED_PCDN_DOMAINS == BLOCKED_PCDN_DOMAINS
-    assert speed.LOW_PRIORITY_DOMAINS == LOW_PRIORITY_DOMAINS
+    assert speed.HIGH_PRIORITY_DOMAINS == HIGH_PRIORITY_DOMAINS
     data = play_data(112)
     data["dash"]["video"].extend(play_data(80)["dash"]["video"])
     data["dash"]["video"].extend(play_data(116, "av01.0.12")["dash"]["video"])
@@ -72,8 +72,8 @@ def test_filter_pcdn_and_unsafe_candidates():
         "https://a.akamaized.net/b?sign=BACKUP",
     ]
     assert speed.select_video(data, block_pcdn=True)[1] == [
-        video["backup_url"][2],
         video["base_url"],
+        video["backup_url"][2],
     ]
 
 

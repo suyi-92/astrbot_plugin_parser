@@ -201,8 +201,8 @@ def test_official_urls_preserved_and_pcdn_blocked():
     main = "https://upos-sz-mirrorcosov.bilivideo.com/x?sign=original"
     backup = "https://upos-hz-mirrorakam.akamaized.net/y?sign=backup"
     assert candidates({"base_url": main, "backup_url": [backup, main]}, False) == [
-        backup,
         main,
+        backup,
     ]
     pcdn = "https://a.mcdn.bilivideo.com/x?sign=pcdn"
     assert candidates({"baseUrl": pcdn, "backupUrl": [backup]}, True) == [backup]

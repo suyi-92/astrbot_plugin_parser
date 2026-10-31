@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp import web
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.components import Plain, Video
+from astrbot.core.message.components import File, Plain, Video
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
@@ -98,12 +98,23 @@ def video_hash(path):
     ).strip()
 
 
+def audio_hash(path):
+    return subprocess.check_output(
+        [
+            "ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0",
+            "-c", "copy", "-f", "hash", "-hash", "sha256", "-",
+        ]
+    ).strip()
+
+
 async def test_real_ffmpeg_merge_copies_video_and_audio(media, tmp_path):
     video, audio = media
     old_hash = video_hash(video)
+    old_audio_hash = audio_hash(audio)
     target = tmp_path / "merged.mp4"
     await utils.merge_av(v_path=video, a_path=audio, output_path=target)
     assert video_hash(target) == old_hash
+    assert audio_hash(target) == old_audio_hash
     probe = await utils.probe_media(target, strict=True)
     assert {s["codec_type"] for s in probe["streams"]} == {"video", "audio"}
     assert not video.exists() and not audio.exists()
@@ -249,6 +260,20 @@ async def test_qqofficial_upload_and_onebot_keep_file_bytes(media):
     onebot = await AiocqhttpMessageEvent._from_segment_to_dict(component)
     assert onebot["type"] == "video"
     assert onebot["data"]["file"] == path.as_uri()
+
+
+async def test_completed_bilibili_media_builds_native_video_segment(cfg, media):
+    path, _ = media
+    content = VideoContent(path)
+    result = ParseResult(platform=Platform("bilibili", "B站"), contents=[content])
+    segments = await MessageSender(cfg, SimpleNamespace())._build_segments(
+        result,
+        {"light": [], "heavy": [content], "render_card": False, "force_merge": False},
+    )
+    assert len(segments) == 1 and isinstance(segments[0], Video)
+    assert not any(isinstance(segment, File) for segment in segments)
+    onebot = await AiocqhttpMessageEvent._from_segment_to_dict(segments[0])
+    assert onebot["type"] == "video" and onebot["data"]["file"] == path.as_uri()
 
 
 async def test_astrbot_4293_full_lifecycle_admin_commands_and_config(

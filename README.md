@@ -5,7 +5,7 @@
 
 # astrbot_plugin_parser
 
-_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.6 ✨_
+_✨ 链接解析器 · suyi-92 Fork 维护版 v1.6.8 ✨_
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
@@ -73,7 +73,7 @@ B站下载线路由「使用代理」独立控制。若全局配置了 HTTP/VLES
 本仓库维护自 [Zhalslar/astrbot_plugin_parser](https://github.com/Zhalslar/astrbot_plugin_parser)，
 基线为 `5286c1e9b6682635eb28dcb5bcfa25e6947a76c6`（v1.6.1，与上游相同，发布提交之后只有 README 修改）。
 保留插件内部名称 `astrbot_plugin_parser`、原作者署名与 [MIT 许可证](LICENSE)。
-本次版本为 **v1.6.6 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
+本次版本为 **v1.6.8 Fork**，没有恢复 v1.6.1 已禁用的平台；默认模板中的残留 JMComic 条目已去除。
 
 目标环境：AstrBot **4.29.3**、Python **3.12**、Debian/Docker；需要 `ffmpeg` 和 `ffprobe`。
 完整的部署、回滚和验收说明见 [Fork 运维说明](docs/FORK_MAINTENANCE.md)。
@@ -86,7 +86,7 @@ B站下载线路由「使用代理」独立控制。若全局配置了 HTTP/VLES
    如部署版本提示目录已存在，先停止操作并查看报错，可使用运维说明中的手动代码替换步骤。
 4. WebUI 安装会处理 `requirements.txt`；手动安装时使用 AstrBot 的 Python 环境安装依赖。
    确认 FFmpeg/ffprobe 可执行，再启用/重载插件。
-5. 查看版本是否为 v1.6.6、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
+5. 查看版本是否为 v1.6.8、`repo` 是否指向本 Fork。以后通过这个 Fork 更新，无需修改 site-packages。
 
 回滚时停用插件，恢复备份的**插件代码**，或检出上游 v1.6.1 发布提交
 `99eb31c76738fe9e865f56697d53146df153b1f2`。重新安装该版本依赖并启用。
@@ -150,7 +150,7 @@ API 的 `worker_proxy=on/off` 来自独立进程内的实际库配置；完成�
   子进程只通过匿名管道接收凭证，不使用命令行参数、环境变量或临时凭证文件传递；退出登录、取消请求、重载会结束相关子进程。
   依赖范围限定在 `bilibili-api-python >=17.4.1,<17.5.0`。
 - **CDN 567/403/5xx**：从 API 的 `base_url`/`baseUrl`/`url` 和 `backup_url`/`backupUrl` 提取完整候选地址，视频/音频都可切换。
-  已知问题节点 `upos-sz-mirrorcosov.bilivideo.com` 降低优先级，失败切换不依赖这个域名。
+  优先采用生产样本中较快的 `upos-sz-mirrorcosov.bilivideo.com`（仅当官方接口返回该候选），保留其他官方备用节点；实测速率不代表长期保证。截断响应和超时及时切换候选。
   不拼接域名、不复用其他节点的签名。`block_pcdn=true` 时排除已识别的 P/MCDN，全部被排除就报错，**不会回退到被屏蔽节点**。
 - **续传**：`.part` 与 `.part.json` 留存断点；检查 206 的起点、终点、总长度和验证器。
   同地址需要强 ETag 或 Last-Modified 与已知总长度；跨地址需要相同强 ETag、相同总长度和相同流标识。
@@ -164,7 +164,8 @@ API 的 `worker_proxy=on/off` 来自独立进程内的实际库配置；完成�
 - **大小、画质和缓存**：`source_max_size` 仍以 MiB 计，限制单流、音视频之和及最终文件；`source_max_minute` 为正数时在下载前检查，`0` 或负数表示不限媒体时长。
   码率预估超限会报错，不通过偷偷降清晰度规避限制。画质设置是**上限**，实际画质取决于 API 与账号权限。
   INFO 记录实际画质 ID（32=480P、64=720P、80=1080P、116=1080P60）、宽高、帧率、编码和估算字节数。
-  新缓存位于 `cache/bilibili/`，标识包含实际画质、编码、媒体路径摘要和音频流；先选流再查缓存。
+  新缓存位于 `cache/bilibili/`，标识包含实际画质、编码、媒体路径摘要和音频流。30 分钟索引在播放地址请求前验证完整缓存，按 BV/分 P、画质上限、编码偏好与不可逆账号指纹隔离；同一请求锁内完成预检、下载和索引发布。
+  索引不保存 Cookie 或签名 URL；过期、缺失、损坏、配置/账号变化自动回退选流下载，不跨请求画质或账号复用。
   旧的 `BVxxx-1.mp4` 不复用，留给原有清理周期自然失效。
 - **合并与磁盘**：两条流都完成才运行 FFmpeg `-c copy`。完整性检查后原子发布最终文件，失败/取消不发送 `.part`。
   非 AAC-LC 音频兼容处理仍保持 `-c:v copy`，保存原文件和经过验证的转换文件。
@@ -207,11 +208,14 @@ QQ 官方[富媒体文档](https://bot.q.qq.com/wiki/develop/api-v2/server-inter
 ```sh
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt -r requirements-test.txt
-.venv/bin/python -m pytest -q
-.venv/bin/python -m compileall -q main.py core tests
+.venv/bin/python -W error::ResourceWarning -m pytest -q
+.venv/bin/python -m compileall -q main.py core tests tools
+.venv/bin/ruff check --select F,E9 main.py core tests tools
+bash -n tools/bili_speedtest.sh
 ```
 
-测试使用本地 HTTP 服务、合成凭证和 Mock，不需要真实 B站账号或 API。
+CI 在 Python 3.12 下分别锁定 bilibili-api-python 17.4.1 与 17.4.2，运行完整 pytest，不下载 Xray 或访问外部代理节点。测试使用本地 HTTP/HTTPS 服务、受控代理子进程、合成凭证和 Mock，不需要真实 B站账号或 API。
+真实 Xray TLS/REALITY 测试保留为手动验收：`XRAY_TEST_BINARY=/绝对路径/xray .venv/bin/python -m pytest -q tests/manual_vless_tunnel.py`；该命令要求维护者提供内核。
 包含精确复现 73,745,233 bytes 文件在 43,122,045 bytes 断流后的 Range 续传与 SHA-256 对比、CDN 失败切换、错误 Range/416、取消、限额、并发、低画质缓存隔离、扫码退出竞争，以及真实 FFmpeg 视频流 copy 和 AstrBot 4.29.3 生命周期测试。
 完整测试范围、限制和线上验收步骤见 [运维说明](docs/FORK_MAINTENANCE.md)。
 

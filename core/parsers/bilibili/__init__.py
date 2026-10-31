@@ -25,6 +25,7 @@ from ..base import (
 from .login import BilibiliLogin
 from .api import BilibiliAPI, BilibiliVideo
 from .streams import select_streams
+from .cache import VideoCacheIndex, VideoCacheKey
 
 
 class BilibiliParser(BaseParser):
@@ -51,6 +52,7 @@ class BilibiliParser(BaseParser):
         self.login = BilibiliLogin(config, self.api)
         self.resumable = ResumableDownloader(config)
         self.resumable.cleanup()
+        self.video_cache = VideoCacheIndex(self.resumable)
 
     async def close_session(self):
         await self.login.close()
@@ -181,7 +183,7 @@ class BilibiliParser(BaseParser):
         url = f"https://bilibili.com/{video_info.bvid}"
         url += f"?p={page_info.index + 1}" if page_info.index > 0 else ""
 
-        # Resolve the actual stream BEFORE any cache lookup.
+        # The media task checks a verified, request-scoped cache before playurl.
         video_task = self.resumable.start(
             self._download_media(video, video_info.bvid, page_num, page_info.duration)
         )
@@ -203,7 +205,7 @@ class BilibiliParser(BaseParser):
 
     async def _get_ai_summary(self, video, page_info) -> str:
         """Fetch the optional Bilibili AI summary only when explicitly enabled."""
-        if not self.mycfg.fetch_ai_summary or not self.login._credential:
+        if not getattr(self.mycfg, "fetch_ai_summary", False) or not self.login._credential:
             return ""
         from .video import AIConclusion
 
@@ -413,9 +415,25 @@ class BilibiliParser(BaseParser):
     async def _download_media(self, video, bvid, page, duration, audio_only=False):
         try:
             async with asyncio.timeout(max(1, self.mycfg.task_timeout)):
-                return await self._download_selected(
-                    video, bvid, page, duration, audio_only
-                )
+                if duration > self.cfg.max_duration:
+                    raise DurationLimitException
+                if audio_only:
+                    return await self._download_selected(
+                        video, bvid, page, duration, audio_only
+                    )
+                key = self._video_cache_key(bvid, page)
+                # Keep cold misses and index publication under the same lock. A
+                # second parser/task rechecks the cache without a second playurl.
+                async with cache_lock(key.index_path(self.resumable.directory)):
+                    self._check_cache_account(key, bvid, page)
+                    cached = await self.video_cache.find(key)
+                    self._check_cache_account(key, bvid, page)
+                    if cached:
+                        note(self.cfg.debug_media_info, "播放地址前完整缓存命中")
+                        return cached
+                    return await self._download_selected(
+                        video, bvid, page, duration, audio_only, cache_key=key
+                    )
         except (DownloadException, asyncio.CancelledError):
             raise
         except TimeoutError:
@@ -427,11 +445,26 @@ class BilibiliParser(BaseParser):
                 "B站下载或合并失败，请检查网络、FFmpeg 和磁盘空间"
             ) from None
 
-    async def _download_selected(self, video, bvid, page, duration, audio_only):
+    def _video_cache_key(self, bvid, page):
+        self.login._init_local()
+        return VideoCacheKey.create(
+            bvid, page, self.video_quality.value, self.video_codecs,
+            self.login._credential, generation=self.login._generation,
+        )
+
+    def _check_cache_account(self, key, bvid, page):
+        if self._video_cache_key(bvid, page) != key:
+            raise DownloadException("B站账号或下载设置已变化，请重新解析")
+
+    async def _download_selected(
+        self, video, bvid, page, duration, audio_only, *, cache_key=None
+    ):
         debug = self.cfg.debug_media_info
         if duration > self.cfg.max_duration:
             raise DurationLimitException
         selected = await self._select_streams(video, page - 1, duration)
+        if cache_key:
+            self._check_cache_account(cache_key, bvid, page)
         if selected.duration > self.cfg.max_duration:
             raise DurationLimitException
         if audio_only and not selected.audio:
@@ -439,18 +472,31 @@ class BilibiliParser(BaseParser):
         identity = selected.audio.identity if audio_only else selected.identity
         quality = selected.video.info["quality"]
         suffix = ".m4a" if audio_only else ".mp4"
-        output = (
-            self.resumable.directory / f"{bvid}-{page}-q{quality}-{identity}{suffix}"
+        filename = (
+            cache_key.filename(quality, identity) if cache_key
+            else f"{bvid}-{page}-q{quality}-{identity}{suffix}"
         )
-        resource = f"{bvid}:{page}:{identity}"
+        output = self.resumable.directory / filename
+        resource = (
+            cache_key.resource(identity) if cache_key else f"{bvid}:{page}:{identity}"
+        )
         waiting = time.monotonic()
         note(debug, "成片缓存锁等待")
         async with cache_lock(output):
             note(debug, f"成片缓存锁就绪 elapsed_s={time.monotonic() - waiting:.2f}")
             with stage(debug, "成片缓存校验"):
+                # A rejected preflight symlink must not become an ordinary cache
+                # hit on fallback. Remove only the links, never their targets.
+                receipt = Path(str(output) + ".complete.json")
+                for candidate in (output, receipt):
+                    if candidate.is_symlink():
+                        candidate.unlink()
                 cached = await self.resumable.cached(output, resource)
             if cached:
                 note(debug, f"成片缓存命中 bytes={output.stat().st_size}，跳过下载合并")
+                if cache_key:
+                    self._check_cache_account(cache_key, bvid, page)
+                    self.video_cache.store(cache_key, output, resource)
                 return output
             note(debug, "成片缓存未命中，开始下载")
             estimated = (
@@ -500,6 +546,23 @@ class BilibiliParser(BaseParser):
             async def validate(path):
                 await probe_media(path, strict=True)
 
+            async def publish(path):
+                if cache_key:
+                    self._check_cache_account(cache_key, bvid, page)
+                await self.resumable.publish(path, output, resource)
+                if cache_key:
+                    try:
+                        self._check_cache_account(cache_key, bvid, page)
+                    except DownloadException:
+                        # publish hashes in a thread, so an account/config change
+                        # can happen during its await. Never leave a valid receipt
+                        # for media published under the previous request scope.
+                        try:
+                            Path(str(output) + ".complete.json").unlink(missing_ok=True)
+                        finally:
+                            output.unlink(missing_ok=True)
+                        raise
+
             async def download(stream, kind):
                 path = output.with_name(output.stem + f".{kind}.m4s")
                 return await self.resumable.download(
@@ -517,7 +580,7 @@ class BilibiliParser(BaseParser):
             try:
                 if audio_only:
                     paths = [await download(selected.audio, "audio")]
-                    await self.resumable.publish(paths[0], output, resource)
+                    await publish(paths[0])
                 elif selected.audio:
                     tasks = [
                         asyncio.create_task(download(selected.video, "video")),
@@ -530,7 +593,10 @@ class BilibiliParser(BaseParser):
                         for task in tasks:
                             if not task.done():
                                 task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        # A completed sibling must be cleaned even when gather
+                        # raised because the other stream failed or was cancelled.
+                        paths = [result for result in results if isinstance(result, Path)]
                     if sum(p.stat().st_size for p in paths) > self.cfg.max_size:
                         raise SizeLimitException
                     with stage(debug, "FFmpeg合并（copy）"):
@@ -540,10 +606,13 @@ class BilibiliParser(BaseParser):
                     with stage(debug, "成片完整性校验"):
                         await validate(merged)
                     with stage(debug, "成片缓存写入"):
-                        await self.resumable.publish(merged, output, resource)
+                        await publish(merged)
                 else:
                     paths = [await download(selected.video, "video")]
-                    await self.resumable.publish(paths[0], output, resource)
+                    await publish(paths[0])
+                if cache_key:
+                    self._check_cache_account(cache_key, bvid, page)
+                    self.video_cache.store(cache_key, output, resource)
                 note(debug, f"B站媒体就绪 bytes={output.stat().st_size}")
                 return output
             finally:

@@ -274,7 +274,10 @@ class ResumableDownloader:
                 url = urljoin(url, location)
                 continue
             try:
-                yield response
+                # Track the actual redirect target without persisting its URL.
+                # Last-Modified alone only identifies a representation at the
+                # exact same address; a redirect must not bypass that rule.
+                yield response, hashlib.sha256(url.encode()).hexdigest()
             finally:
                 response.release()
             return
@@ -333,6 +336,7 @@ class ResumableDownloader:
         part, meta_path = Path(str(path) + ".part"), Path(str(path) + ".part.json")
         max_bytes = self.cfg.source_max_size * 1024 * 1024
         index, refreshed, last_error = 0, False, "no-candidate"
+        refresh_needed = False
         failures = {}
         # Never forward credentials to a media host or a redirect target.
         request_headers = {
@@ -378,7 +382,10 @@ class ResumableDownloader:
                 f"attempt={attempt + 1}/{self.cfg.download_retry_times + 1} resume_bytes={offset} {route}",
             )
             try:
-                async with self._response(url, send_headers, proxy) as response:
+                async with self._response(url, send_headers, proxy) as (
+                    response,
+                    response_url_hash,
+                ):
                     status = response.status
                     peer = response_peer(response, proxy) if debug else ""
                     note(
@@ -394,7 +401,7 @@ class ResumableDownloader:
                         # A complete partial cannot be trusted merely from a 416 reply.
                         self._discard(path)
                         raise Retryable("HTTP416")
-                    if status in (401, 403, 410, 567) or status >= 500:
+                    if status in (401, 403, 404, 410, 567) or status >= 500:
                         raise Retryable(
                             f"HTTP{status}",
                             rotate=True,
@@ -431,15 +438,14 @@ class ResumableDownloader:
                         if offset:
                             valid = valid and total == meta.get("total")
                             valid = valid and (
+                                strong or response_url_hash == meta.get("url_hash")
+                            )
+                            valid = valid and (
                                 new_etag == etag
                                 if strong
                                 else modified == meta.get("modified")
                             )
-                            if (
-                                meta.get("modified")
-                                and modified
-                                and modified != meta["modified"]
-                            ):
+                            if modified != meta.get("modified", ""):
                                 valid = False
                             if etag and new_etag and new_etag != etag:
                                 valid = False
@@ -456,7 +462,7 @@ class ResumableDownloader:
                         raise SizeLimitException
                     meta = {
                         "resource": resource,
-                        "url_hash": url_hash,
+                        "url_hash": response_url_hash,
                         "total": total,
                         "etag": new_etag,
                         "modified": modified,
@@ -475,9 +481,9 @@ class ResumableDownloader:
                         output.flush()
                         os.fsync(output.fileno())
                     if expected_end is not None and offset != expected_end:
-                        raise Retryable("incomplete-range")
+                        raise Retryable("incomplete-range", rotate=True)
                     if total is not None and offset != total:
-                        raise Retryable("incomplete-payload")
+                        raise Retryable("incomplete-payload", rotate=True)
                     if not offset:
                         raise ZeroSizeException
                     progress.update(offset, force=True)
@@ -515,13 +521,20 @@ class ResumableDownloader:
                     f"attempt_s={time.monotonic() - started:.2f} saved_bytes={offset}",
                 )
                 failures[url_hash] = failures.get(url_hash, 0) + 1
-                rotate = isinstance(exc, Retryable) and exc.rotate
+                refresh_needed = refresh_needed or (
+                    isinstance(exc, Retryable) and exc.refresh
+                )
+                # A truncated payload or timed-out CDN is already unhealthy.
+                # Rotate now, leaving the remaining bounded attempts available
+                # for a validator check and, if necessary, a clean restart.
+                rotate = (isinstance(exc, Retryable) and exc.rotate) or isinstance(
+                    exc, (aiohttp.ClientPayloadError, TimeoutError)
+                )
                 if rotate or failures[url_hash] >= 2:
                     index += 1
                 # Refresh only expired/auth candidates, once, within the original budget.
                 if (
-                    isinstance(exc, Retryable)
-                    and exc.refresh
+                    refresh_needed
                     and refresh
                     and not refreshed
                     and index >= len(urls)
