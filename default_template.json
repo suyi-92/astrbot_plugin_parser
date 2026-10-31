@@ -12,6 +12,7 @@
     "api_client": "aiohttp",
     "api_user_agent": "curl/8.14.1",
     "auto_buvid": false,
+    "fetch_ai_summary": false,
     "connect_timeout": 15,
     "read_timeout": 60,
     "task_timeout": 900,
