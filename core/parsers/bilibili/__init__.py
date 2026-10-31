@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from re import Match
 from typing import ClassVar
 import shutil
@@ -14,7 +16,7 @@ from ...config import PluginConfig
 from ...data import ImageContent, MediaContent, Platform, SendGroup
 from ...diagnostics import note, stage
 from ...exception import DownloadException, DurationLimitException, SizeLimitException
-from ...resumable import ResumableDownloader, cache_lock
+from ...resumable import ResumableDownloader, cache_lock, write_json
 from ...utils import merge_av, probe_media
 from ..base import (
     BaseParser,
@@ -178,13 +180,19 @@ class BilibiliParser(BaseParser):
         # AI 摘要不是视频下载所必需；默认关闭，避免每条视频额外请求 CID 和 AI 总结接口。
         ai_summary = await self._get_ai_summary(video, page_info)
 
+        # A short-lived local index allows a verified warm cache to be reused
+        # before asking Bilibili for a fresh signed play URL.
+        cached_path = await self._find_cached_video(video_info.bvid, page_num)
+
         url = f"https://bilibili.com/{video_info.bvid}"
         url += f"?p={page_info.index + 1}" if page_info.index > 0 else ""
 
-        # Resolve the actual stream BEFORE any cache lookup.
-        video_task = self.resumable.start(
-            self._download_media(video, video_info.bvid, page_num, page_info.duration)
-        )
+        if cached_path is not None:
+            video_task = self.resumable.start(self._return_cached_video(cached_path))
+        else:
+            video_task = self.resumable.start(
+                self._download_media(video, video_info.bvid, page_num, page_info.duration)
+            )
         video_content = self.create_video_content(
             video_task,
             page_info.cover,
@@ -200,6 +208,79 @@ class BilibiliParser(BaseParser):
             contents=[video_content],
             extra={"info": ai_summary},
         )
+
+    def _cache_index_path(self, bvid: str, page: int) -> Path:
+        """Return a short-lived cache pointer scoped to quality, codecs and account."""
+        self.login._init_local()
+        credential = self.login._credential
+        cookies = credential.get_cookies() if credential else {}
+        account = cookies.get("DedeUserID") or cookies.get("dedeuserid")
+        if not account and cookies.get("SESSDATA"):
+            # Hash the credential as a fallback; never persist the cookie itself.
+            account = hashlib.sha256(cookies["SESSDATA"].encode()).hexdigest()
+        settings = {
+            "version": 1,
+            "bvid": bvid,
+            "page": page,
+            "quality": getattr(self.video_quality, "value", self.video_quality),
+            "codecs": self.video_codecs,
+            "account": account or "anonymous",
+        }
+        key = hashlib.sha256(
+            json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:24]
+        return self.resumable.directory / f"{bvid}-{page}-{key}.index.json"
+
+    async def _find_cached_video(self, bvid: str, page: int) -> Path | None:
+        """Find a verified recent cache entry without requesting a signed play URL."""
+        index = self._cache_index_path(bvid, page)
+        async with cache_lock(index):
+            try:
+                entry = json.loads(index.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                return None
+            updated = entry.get("updated_at")
+            if not isinstance(updated, (int, float)) or time.time() - updated > 1800:
+                index.unlink(missing_ok=True)
+                return None
+            filename = entry.get("file")
+            resource = entry.get("resource")
+            if (
+                not isinstance(filename, str)
+                or Path(filename).name != filename
+                or not filename.endswith(".mp4")
+                or not isinstance(resource, str)
+                or not resource.startswith(f"{bvid}:{page}:")
+            ):
+                index.unlink(missing_ok=True)
+                return None
+            path = self.resumable.directory / filename
+            if await self.resumable.cached(path, resource):
+                note(
+                    self.cfg.debug_media_info,
+                    f"播放地址前缓存命中 bvid={bvid} page={page} bytes={path.stat().st_size}",
+                )
+                return path
+            index.unlink(missing_ok=True)
+            return None
+
+    async def _write_video_cache_index(
+        self, bvid: str, page: int, path: Path, resource: str
+    ) -> None:
+        index = self._cache_index_path(bvid, page)
+        async with cache_lock(index):
+            write_json(
+                index,
+                {
+                    "file": path.name,
+                    "resource": resource,
+                    "updated_at": time.time(),
+                },
+            )
+
+    @staticmethod
+    async def _return_cached_video(path: Path) -> Path:
+        return path
 
     async def _get_ai_summary(self, video, page_info) -> str:
         """Fetch the optional Bilibili AI summary only when explicitly enabled."""
@@ -544,6 +625,8 @@ class BilibiliParser(BaseParser):
                 else:
                     paths = [await download(selected.video, "video")]
                     await self.resumable.publish(paths[0], output, resource)
+                if not audio_only:
+                    await self._write_video_cache_index(bvid, page, output, resource)
                 note(debug, f"B站媒体就绪 bytes={output.stat().st_size}")
                 return output
             finally:
